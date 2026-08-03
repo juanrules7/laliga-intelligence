@@ -1,0 +1,156 @@
+team,manager,date_from,date_to,status
+Real Madrid,Zinedine Zidane,2016-01-04,2018-05-31,resigned
+Real Madrid,Julen Lopetegui,2018-06-12,2018-10-29,sacked
+Real Madrid,Santiago Solari,2018-10-30,2019-03-11,sacked
+Real Madrid,Zinedine Zidane,2019-03-11,2021-05-27,resigned
+Real Madrid,Carlo Ancelotti,2021-06-01,2025-05-25,departed
+Real Madrid,Xabi Alonso,2025-06-01,2026-01-12,mutual
+Real Madrid,Álvaro Arbeloa,2026-01-12,,current
+Barcelona,Ernesto Valverde,2017-05-29,2020-01-13,sacked
+Barcelona,Quique Setién,2020-01-13,2020-08-17,sacked
+Barcelona,Ronald Koeman,2020-08-19,2021-10-27,sacked
+Barcelona,Xavi Hernández,2021-11-05,2024-05-26,sacked
+Barcelona,Hansi Flick,2024-05-29,,current
+Atletico Madrid,Diego Simeone,2011-12-23,,current
+Real Betis,Quique Setién,2017-01-09,2019-05-19,mutual
+Real Betis,Rubi,2019-06-06,2020-06-21,departed
+Real Betis,Alexis Trujillo,2020-06-21,2020-07-09,caretaker_end
+Real Betis,Manuel Pellegrini,2020-07-09,,current
+Real Sociedad,Imanol Alguacil,2018-03-01,2018-06-30,caretaker_end
+Real Sociedad,Asier Garitano,2018-07-01,2018-12-26,sacked
+Real Sociedad,Imanol Alguacil,2018-12-26,2025-06-30,end_of_contract
+Real Sociedad,Sergio Francisco,2025-07-01,2025-12-14,sacked
+Real Sociedad,Ion Ansotegi,2025-12-14,2025-12-20,caretaker_end
+Real Sociedad,Pellegrino Matarazzo,2025-12-20,,current
+Real Valladolid,Sergio González,2018-07-01,2021-05-22,departed
+Real Valladolid,Pacheta,2022-07-01,2023-04-03,departed
+Real Valladolid,Paulo Pezzolano,2023-04-04,2024-11-30,departed
+Real Valladolid,Álvaro Rubio,2024-12-02,2024-12-14,caretaker_end
+Real Valladolid,Diego Cocca,2024-12-14,2025-02-17,departed
+Real Valladolid,Álvaro Rubio,2025-02-19,2025-06-30,caretaker_end
+SD Huesca,Leo Franco,2018-05-28,2018-10-09,sacked
+SD Huesca,Francisco Rodríguez,2018-10-10,2019-06-30,departed
+SD Huesca,Míchel Sánchez,2020-07-01,2021-01-12,departed
+SD Huesca,Pacheta,2021-01-12,2021-06-30,departed
+Sevilla,Joaquín Caparrós,2018-01-01,2018-05-28,caretaker_end
+Sevilla,Pablo Machín,2018-05-28,2019-03-15,sacked
+Sevilla,Joaquín Caparrós,2019-03-15,2019-05-23,end_of_contract
+Sevilla,Julen Lopetegui,2019-06-04,2022-10-05,departed
+Sevilla,Jorge Sampaoli,2022-10-06,2023-03-21,departed
+Sevilla,José Luis Mendilibar,2023-03-21,2023-10-08,sacked
+Sevilla,Diego Alonso,2023-10-10,2023-12-16,sacked
+Sevilla,Quique Sánchez Flores,2023-12-18,2024-06-02,mutual
+Sevilla,García Pimienta,2024-06-02,2025-04-13,departed
+Sevilla,Joaquín Caparrós,2025-04-13,2025-06-30,caretaker_end
+Sevilla,Matías Almeyda,2025-07-01,2026-03-23,sacked
+Sevilla,Luis García,2026-03-24,,current
+Espanyol,David Gallego,2018-01-01,2018-06-03,end_of_contract
+Espanyol,Rubi,2018-06-03,2019-06-06,departed
+Espanyol,David Gallego,2019-06-06,2019-10-07,departed
+Espanyol,Pablo Machín,2019-10-07,2019-12-27,departed
+Espanyol,Abelardo,2019-12-27,2020-06-30,departed
+Espanyol,Vicente Moreno,2021-07-01,2022-05-13,sacked
+Espanyol,Luis Blanco,2022-05-13,2022-05-31,caretaker_end
+Espanyol,Diego Martínez,2022-05-31,2023-04-03,departed
+Espanyol,Luis García,2023-04-03,2023-06-30,departed
+Espanyol,Manolo González,2024-06-01,,current
+Getafe,José Bordalás,2016-07-01,2021-05-26,mutual
+Getafe,Míchel Sánchez,2021-05-27,2021-10-04,departed
+Getafe,Quique Sánchez Flores,2021-10-06,2023-04-27,departed
+Getafe,José Bordalás,2023-04-29,,current
+Girona,Eusebio Sacristán,2018-06-07,2019-06-30,departed
+Girona,Míchel Sánchez,2021-06-01,,current
+Leganes,Mauricio Pellegrino,2018-06-02,2019-10-21,resigned
+Leganes,Javier Aguirre,2019-10-22,2020-06-30,departed
+Leganes,Borja Jiménez,2024-07-01,2025-06-30,departed
+Levante,Juan Ramón López Muñiz,2018-07-01,2019-02-11,sacked
+Levante,Paco López,2019-02-12,2021-10-03,sacked
+Levante,Javier Pereira,2021-10-07,2021-11-29,departed
+Levante,Alessio Lisci,2021-12-07,2022-06-30,departed
+Levante,Julián Calero,2025-07-01,2025-11-30,sacked
+Levante,Álvaro del Moral,2025-11-30,2025-12-20,caretaker_end
+Levante,Luís Castro,2025-12-20,,current
+Rayo Vallecano,Míchel Sánchez,2018-07-01,2019-03-18,sacked
+Rayo Vallecano,Paco Jémez,2019-03-20,2019-06-30,departed
+Rayo Vallecano,Andoni Iraola,2020-01-01,2023-06-28,end_of_contract
+Rayo Vallecano,Francisco Rodríguez,2023-06-28,2024-02-13,sacked
+Rayo Vallecano,Íñigo Pérez,2024-02-15,,current
+Valencia,Marcelino García Toral,2017-05-02,2019-09-11,sacked
+Valencia,Albert Celades,2019-09-11,2020-06-29,departed
+Valencia,Voro,2020-06-29,2020-07-27,caretaker_end
+Valencia,Javi Gracia,2020-07-27,2021-05-02,departed
+Valencia,Voro,2021-05-03,2021-05-27,caretaker_end
+Valencia,José Bordalás,2021-05-27,2022-05-22,sacked
+Valencia,Gennaro Gattuso,2022-06-09,2023-01-31,mutual
+Valencia,Voro,2023-01-31,2023-02-14,caretaker_end
+Valencia,Rubén Baraja,2023-02-14,2024-12-23,sacked
+Valencia,Carlos Corberán,2024-12-25,,current
+Villarreal,Javier Calleja,2017-06-19,2018-12-10,sacked
+Villarreal,Luis García,2018-12-10,2019-01-29,sacked
+Villarreal,Javier Calleja,2019-01-29,2020-07-20,sacked
+Villarreal,Unai Emery,2020-07-23,2022-10-24,departed
+Villarreal,Quique Setién,2022-10-25,2023-09-05,sacked
+Villarreal,Pacheta,2023-09-09,2023-11-10,sacked
+Villarreal,Miguel Ángel Tena,2023-11-10,2023-11-13,caretaker_end
+Villarreal,Marcelino García Toral,2023-11-13,,current
+Celta Vigo,Antonio Mohamed,2018-05-22,2018-11-12,sacked
+Celta Vigo,Miguel Cardoso,2018-11-12,2019-03-03,sacked
+Celta Vigo,Fran Escribá,2019-03-03,2019-11-03,sacked
+Celta Vigo,Óscar García,2019-11-04,2020-11-09,sacked
+Celta Vigo,Eduardo Coudet,2020-11-12,2022-11-02,sacked
+Celta Vigo,Carlos Carvalhal,2022-11-02,2023-06-23,end_of_contract
+Celta Vigo,Rafael Benítez,2023-06-23,2024-03-12,sacked
+Celta Vigo,Claudio Giráldez,2024-03-12,,current
+Eibar,José Luis Mendilibar,2015-01-19,2021-06-30,departed
+Granada,Diego Martínez,2018-01-01,2021-05-27,departed
+Granada,Robert Moreno,2021-06-18,2022-03-06,departed
+Granada,Rubén Torrecilla,2022-03-06,2022-04-18,caretaker_end
+Granada,Aitor Karanka,2022-04-18,2022-06-30,departed
+Granada,Paco López,2023-07-01,2023-11-26,sacked
+Granada,Alexander Medina,2023-11-27,2024-03-19,sacked
+Granada,José Ramón Sandoval,2024-03-19,2024-06-30,departed
+Mallorca,Vicente Moreno,2019-07-01,2019-12-31,departed
+Mallorca,Luis García,2020-01-01,2022-03-22,departed
+Mallorca,Javier Aguirre,2022-03-24,2024-06-10,end_of_contract
+Mallorca,Jagoba Arrasate,2024-06-10,2026-02-23,sacked
+Mallorca,Martín Demichelis,2026-02-26,,current
+Osasuna,Jagoba Arrasate,2019-06-01,2024-05-27,departed
+Osasuna,Vicente Moreno,2024-05-27,2025-06-30,departed
+Osasuna,Alessio Lisci,2025-07-01,,current
+Cadiz,Álvaro Cervera,2015-06-01,2022-01-11,departed
+Cadiz,Sergio González,2022-01-11,2024-01-23,sacked
+Cadiz,Mauricio Pellegrino,2024-01-24,2024-06-30,departed
+Elche,Jorge Almirón,2020-08-26,2021-02-12,resigned
+Elche,Fran Escribá,2021-02-14,2021-11-21,departed
+Elche,Francisco Rodríguez,2021-11-28,2022-10-04,sacked
+Elche,Alberto Gallego,2022-10-07,2022-10-12,caretaker_end
+Elche,Jorge Almirón,2022-10-12,2022-11-07,departed
+Elche,Pablo Machín,2022-11-17,2023-03-20,sacked
+Elche,Sebastián Beccacece,2023-03-21,2023-06-30,departed
+Elche,Eder Sarabia,2025-07-01,,current
+Almeria,Rubi,2022-07-01,2023-06-17,end_of_contract
+Almeria,Vicente Moreno,2023-06-17,2023-09-29,sacked
+Almeria,Alberto Lasarte,2023-09-29,2023-10-08,caretaker_end
+Almeria,Gaizka Garitano,2023-10-08,2024-03-13,sacked
+Almeria,Pepe Mel,2024-03-13,2024-06-30,departed
+Las Palmas,García Pimienta,2022-01-01,2024-06-26,departed
+Las Palmas,Luis Carrión,2024-06-26,2024-10-08,sacked
+Las Palmas,Diego Martínez,2024-10-09,2025-06-30,departed
+Real Oviedo,Veljko Paunović,2025-07-01,2025-10-09,sacked
+Real Oviedo,Luis Carrión,2025-10-09,2025-12-14,sacked
+Real Oviedo,Guillermo Almada,2025-12-16,,current
+Athletic Club,Eduardo Berizzo,2018-05-31,2018-12-04,sacked
+Athletic Club,Gaizka Garitano,2018-12-04,2021-01-03,departed
+Athletic Club,Marcelino García Toral,2021-01-04,2022-05-24,resigned
+Athletic Club,Ernesto Valverde,2022-06-30,,current
+Alaves,Abelardo,2017-01-01,2019-05-20,resigned
+Alaves,Asier Garitano,2019-05-21,2020-07-05,departed
+Alaves,Juan Muñiz,2020-07-05,2020-08-04,end_of_contract
+Alaves,Pablo Machín,2020-08-05,2021-01-15,departed
+Alaves,Abelardo,2021-01-16,2021-04-05,sacked
+Alaves,Javier Calleja,2021-04-05,2021-12-28,departed
+Alaves,José Luis Mendilibar,2021-12-28,2022-04-03,departed
+Alaves,Julio Velázquez,2022-04-05,2022-06-30,departed
+Alaves,Luis García,2023-07-01,2024-12-02,departed
+Alaves,Eduardo Coudet,2024-12-02,2026-03-03,mutual
+Alaves,Quique Sánchez Flores,2026-03-03,,current
