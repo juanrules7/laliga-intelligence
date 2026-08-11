@@ -283,6 +283,39 @@ def build_predictive_correlations(_overperf, _wages):
     return pd.DataFrame(rows)
 
 
+@st.cache_data
+def build_justice_table(_overperf):
+    rows = []
+    for s, g in _overperf.groupby("season"):
+        g2 = g.copy().sort_values("xpts", ascending=False).reset_index(drop=True)
+        g2["xpts_rank"] = g2.index + 1
+        g3 = g2.sort_values("pts", ascending=False).reset_index(drop=True)
+        g3["pts_rank"] = g3.index + 1
+        merged = g2[["team","season","xpts","xpts_rank"]].merge(
+            g3[["team","pts_rank","pts"]], on="team")
+        merged["rank_change"] = merged["pts_rank"] - merged["xpts_rank"]
+        merged["luck"]        = merged["pts"] - merged["xpts"]
+        rows.append(merged)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+@st.cache_data
+def build_pre_season_accuracy(_overperf):
+    rows = []
+    for s, g in _overperf.groupby("season"):
+        g2 = g.copy()
+        g2["sv_rank"]  = g2["squad_value_m"].rank(ascending=False)
+        g2["pts_rank"] = g2["pts"].rank(ascending=True)
+        bottom3_pred = set(g2.nsmallest(3,"squad_value_m")["team"])
+        bottom3_act  = set(g2.nsmallest(3,"pts")["team"])
+        top6_pred    = set(g2.nlargest(6,"squad_value_m")["team"])
+        top6_act     = set(g2.nlargest(6,"pts")["team"])
+        rows.append({"season": s,
+                     "bottom3_hits": len(bottom3_pred & bottom3_act),
+                     "top6_hits":    len(top6_pred & top6_act)})
+    return pd.DataFrame(rows)
+
+
 @st.cache_resource
 def train_model(_tm):
     FEATURES = [
@@ -392,6 +425,8 @@ overperf["manager_skill_xpts"] = overperf["xpts"] - overperf["predicted_xpts"]
 mgr_stints   = build_manager_stints(tm, managers, overperf, value_xpts_model)
 wages        = load_wages()
 pred_corrs   = build_predictive_correlations(overperf, wages)
+justice_table = build_justice_table(overperf)
+preseas_acc   = build_pre_season_accuracy(overperf)
 seasons_available = sorted(tm["season"].unique(), reverse=True)
 
 # ── sidebar ──────────────────────────────────────────────────────────────
@@ -504,10 +539,11 @@ else:
 st.divider()
 
 # ── tabs ─────────────────────────────────────────────────────────────────
-# NOTE: this is a deliberately trimmed public build — only Article 1's tab is
-# included. Articles 2-6 unlock here as each one is published; see dashboard.py
-# in the private dev repo for the full 6-tab version.
-tab1, = st.tabs(["Article 1 — Framework"])
+# NOTE: this is a deliberately trimmed public build — only Article 1's tab,
+# plus Group 1 of Article 2, are included. The rest of Article 2 (Groups 2-4)
+# and Articles 3-6 unlock here as each is published; see dashboard.py in the
+# private dev repo for the full version.
+tab1, tab2 = st.tabs(["Article 1 — Framework", "Article 2 — Clubs"])
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -822,3 +858,222 @@ with tab1:
     plt.tight_layout()
     st.pyplot(fig2)
     plt.close()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TAB 2 — Article 2, Group 1 only (Club Rankings & Deserved Performance)
+# ════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.subheader("Article 2 — The Clubs: Who's Beating the Budget and Who Isn't")
+    st.caption(
+        "Club-level overperformance and underperformance, and pre-season prediction accuracy."
+    )
+    st.divider()
+    st.subheader("Group 1 — Club Rankings & Deserved Performance")
+    st.caption(
+        "How every club stacks up against their budget, and what the table would look like if it only rewarded quality of play."
+    )
+    st.markdown("#### Club Rankings — xPts above/below budget expectation")
+    st.caption(
+        "Each club's average xPts residual across all La Liga seasons in the dataset: "
+        "how many xPts per season they produced above or below what their squad value predicted. "
+        "Positive = consistently overperforms budget. Negative = consistently underperforms."
+    )
+
+    cl_all_seasons = st.checkbox(
+        "Show all seasons combined (instead of just the season selected in the sidebar)",
+        value=True, key="cl_all_seasons"
+    )
+    if cl_all_seasons:
+        cl_df_raw = overperf.copy()
+        cl_scope_label = "all seasons (2018/19-2025/26)"
+        cl_min_season_slider_max = 8
+    else:
+        cl_df_raw = overperf[overperf["season"] == selected_season].copy()
+        cl_scope_label = f"{selected_season}/{str(selected_season+1)[-2:]} only"
+        cl_min_season_slider_max = 1
+    if cl_all_seasons:
+        cl_min_seasons = st.slider("Minimum seasons in La Liga", 1, cl_min_season_slider_max, 3, key="cl_min_seasons")
+    else:
+        cl_min_seasons = 1
+    cl_df = cl_df_raw.copy()
+    cl_df["xpts_residual"] = cl_df["xpts"] - cl_df["predicted_xpts"]
+    cl_df["pts_residual"]  = cl_df["pts"]  - cl_df["predicted_xpts"]
+
+    cl_agg = (
+        cl_df.groupby("team")
+        .apply(lambda g: pd.Series({
+            "seasons":       len(g),
+            "avg_residual":  g["xpts_residual"].mean(),
+            "avg_pts_res":   g["pts_residual"].mean(),
+            "seasons_above": (g["xpts_residual"] > 0).sum(),
+            "best_season":   g["xpts_residual"].max(),
+            "worst_season":  g["xpts_residual"].min(),
+        }))
+        .reset_index()
+    )
+    cl_agg = cl_agg[cl_agg["seasons"] >= cl_min_seasons].sort_values("avg_residual", ascending=False).reset_index(drop=True)
+    cl_agg.index += 1
+
+    if cl_agg.empty:
+        st.info("No clubs meet that threshold.")
+    else:
+        fig_cl, ax_cl = plt.subplots(figsize=(9, max(4, len(cl_agg) * 0.42)))
+        colors_cl = ["#2ecc71" if v >= 0 else "#e74c3c" for v in cl_agg["avg_residual"]]
+        bars = ax_cl.barh(
+            cl_agg["team"][::-1],
+            cl_agg["avg_residual"][::-1],
+            color=colors_cl[::-1],
+            edgecolor="white", linewidth=0.5
+        )
+        ax_cl.axvline(0, color="grey", linewidth=0.9, linestyle="--", alpha=0.6)
+        for bar, val in zip(bars, cl_agg["avg_residual"][::-1]):
+            ax_cl.text(
+                val + (0.15 if val >= 0 else -0.15),
+                bar.get_y() + bar.get_height() / 2,
+                f"{val:+.1f}",
+                va="center", ha="left" if val >= 0 else "right", fontsize=8
+            )
+        ax_cl.set_xlabel("Avg xPts vs value-predicted trend (+ = overperforming)", fontsize=9)
+        ax_cl.set_title(f"Club xPts residual - all seasons (2018/19-2025/26)", fontsize=11)
+        ax_cl.grid(axis="x", alpha=0.18)
+        plt.tight_layout()
+        st.pyplot(fig_cl)
+        plt.close()
+
+    st.divider()
+
+    # ── Justice League Table ─────────────────────────────────────────
+    st.markdown("#### The Justice League Table")
+    st.caption(
+        "Replace every team's actual points with their full-season xPts. "
+        "A team above the line got lucky (finished higher on pts than quality suggests); "
+        "below the line was unlucky."
+    )
+    jt_season = st.selectbox(
+        "Season", sorted(justice_table["season"].unique(), reverse=True),
+        format_func=lambda s: f"{s}/{str(s+1)[-2:]}", key="jt_season"
+    )
+    jt = justice_table[justice_table.season == jt_season].copy()
+    col_j1, col_j2 = st.columns(2)
+    with col_j1:
+        st.markdown("**Actual position vs deserved position (xPts)**")
+        jt_sorted = jt.sort_values("xpts_rank").reset_index(drop=True)
+        y_pos = np.arange(len(jt_sorted))
+        fig_dm, ax_dm = plt.subplots(figsize=(6, max(4, len(jt_sorted) * 0.38)))
+        for i, row in jt_sorted.iterrows():
+            line_color = "#e74c3c" if row["luck"] > 0 else "#2ecc71"
+            ax_dm.plot([row["pts_rank"], row["xpts_rank"]], [i, i],
+                       color=line_color, lw=1.8, alpha=0.55, zorder=2)
+        ax_dm.scatter(jt_sorted["pts_rank"], y_pos, color="#3498db", s=70, zorder=4,
+                      edgecolors="white", linewidths=0.6, label="Actual position")
+        ax_dm.scatter(jt_sorted["xpts_rank"], y_pos, color="#2c3e50", s=70, zorder=4,
+                      marker="D", edgecolors="white", linewidths=0.6, label="Deserved position (xPts)")
+        for i, row in jt_sorted.iterrows():
+            ax_dm.annotate(f"{row['pts']:.0f} pts", (row["pts_rank"], i),
+                           fontsize=6, color="#2471a3", xytext=(0, 6), textcoords="offset points",
+                           ha="center", va="bottom")
+            ax_dm.annotate(f"{row['xpts']:.1f} xPts", (row["xpts_rank"], i),
+                           fontsize=6, color="#1c2833", xytext=(0, -6), textcoords="offset points",
+                           ha="center", va="top")
+        ax_dm.set_yticks(y_pos)
+        ax_dm.set_yticklabels(jt_sorted["team"], fontsize=8)
+        ax_dm.invert_yaxis()
+        ax_dm.set_xlim(0.5, 20.5)
+        ax_dm.margins(y=0.03)
+        ax_dm.set_xlabel("League position (1 = best)", fontsize=9)
+        ax_dm.set_title(f"Actual vs deserved — {jt_season}/{str(jt_season+1)[-2:]}", fontsize=10)
+        ax_dm.legend(fontsize=7.5, loc="upper right")
+        ax_dm.grid(axis="x", alpha=0.15)
+        plt.tight_layout()
+        st.pyplot(fig_dm)
+        plt.close()
+    with col_j2:
+        st.markdown("**Luck distribution**")
+        jt_luck = jt.sort_values("luck", ascending=False).copy()
+        fig_jl, ax_jl = plt.subplots(figsize=(6, max(4, len(jt_sorted) * 0.38)))
+        colors_jl = ["#e74c3c" if v > 0 else "#2ecc71" for v in jt_luck["luck"]]
+        ax_jl.barh(jt_luck["team"][::-1], jt_luck["luck"][::-1], color=colors_jl[::-1], edgecolor="white")
+        ax_jl.axvline(0, color="grey", linewidth=0.8, linestyle="--")
+        ax_jl.set_xlabel("Luck = Actual Pts − xPts", fontsize=9)
+        ax_jl.set_title(f"Luck distribution {jt_season}/{str(jt_season+1)[-2:]}", fontsize=10)
+        plt.tight_layout()
+        st.pyplot(fig_jl)
+        plt.close()
+
+    # ── Pre-season prediction accuracy ───────────────────────────────
+    st.divider()
+    st.markdown("#### Pre-season prediction accuracy")
+    st.caption(
+        "If you ranked all clubs by squad value before the season: how many predicted-bottom-3 "
+        "clubs were actually relegated? How many predicted-top-6 actually made Europe?"
+    )
+    if not preseas_acc.empty:
+        fig_ps, axes_ps = plt.subplots(1, 2, figsize=(12, 4))
+        ps_labels = [f"{s}/{str(s+1)[-2:]}" for s in preseas_acc["season"]]
+        for ax, col, title, max_val in [
+            (axes_ps[0], "bottom3_hits", "Bottom 3 correct (max 3)", 3),
+            (axes_ps[1], "top6_hits",    "Top 6 correct (max 6)",    6),
+        ]:
+            colors_ps = ["#2ecc71" if v >= max_val*0.67 else "#f39c12" if v >= 1 else "#e74c3c"
+                         for v in preseas_acc[col]]
+            bars_ps = ax.bar(ps_labels, preseas_acc[col], color=colors_ps, edgecolor="white", alpha=0.88)
+            ax.bar_label(bars_ps, fmt="%d", padding=2, fontsize=9)
+            ax.set_ylim(0, max_val+0.5)
+            ax.set_ylabel("Teams correctly predicted", fontsize=9)
+            ax.set_title(title, fontsize=10)
+            ax.set_xticklabels(ps_labels, rotation=45, ha="right", fontsize=8)
+            ax.axhline(max_val*0.67, color="grey", linestyle="--", linewidth=0.8, alpha=0.6)
+        plt.suptitle("How well does squad value predict relegation and Europe?", fontsize=11)
+        plt.tight_layout()
+        st.pyplot(fig_ps)
+        plt.close()
+
+    st.markdown("**Why the top is easier to predict than the bottom**")
+    st.caption(
+        "Average squad value by budget rank, across all 8 seasons, with the season-to-season range "
+        "shaded. The gap between rank 1 and rank 6 is enormous — those clubs are financially miles "
+        "apart, which is why the top-6 prediction lands so often. Down at ranks 15-20, the values "
+        "bunch together into a near-flat line: several clubs are separated by pocket change in "
+        "transfer-budget terms, so who actually goes down is much closer to a coin flip."
+    )
+    _vr = overperf.dropna(subset=["value_rank"]).copy()
+    _vr["value_rank"] = _vr["value_rank"].astype(int)
+    _vr_agg = (
+        _vr.groupby("value_rank")["squad_value_m"]
+        .agg(mean_value="mean", min_value="min", max_value="max")
+        .reset_index()
+        .sort_values("value_rank")
+    )
+    if not _vr_agg.empty:
+        _vr_map = _vr_agg.set_index("value_rank")["mean_value"]
+        gap_top    = _vr_map.get(1, np.nan) - _vr_map.get(6, np.nan)
+        gap_bottom = _vr_map.get(15, np.nan) - _vr_map.get(20, np.nan)
+
+        c_vr1, c_vr2 = st.columns(2)
+        if not np.isnan(gap_top):
+            c_vr1.metric("Value gap: rank 1 → rank 6", f"€{gap_top:.0f}m")
+        if not np.isnan(gap_bottom):
+            c_vr2.metric("Value gap: rank 15 → rank 20", f"€{gap_bottom:.0f}m")
+
+        fig_vr, ax_vr = plt.subplots(figsize=(10, 5))
+        ax_vr.axvspan(0.5, 6.5, color="#2ecc71", alpha=0.06, zorder=0)
+        ax_vr.axvspan(17.5, 20.5, color="#e74c3c", alpha=0.06, zorder=0)
+        ax_vr.fill_between(_vr_agg["value_rank"], _vr_agg["min_value"], _vr_agg["max_value"],
+                            alpha=0.15, color="#3498db", label="Range across seasons")
+        ax_vr.plot(_vr_agg["value_rank"], _vr_agg["mean_value"], marker="o",
+                   color="#2980b9", lw=2.2, label="Average squad value")
+        _ymax = _vr_agg["max_value"].max()
+        ax_vr.text(3.5, _ymax * 0.97, "Top 6", fontsize=8, color="#27ae60",
+                   ha="center", va="top", style="italic", alpha=0.8)
+        ax_vr.text(19, _ymax * 0.97, "Bottom 3", fontsize=8, color="#c0392b",
+                   ha="center", va="top", style="italic", alpha=0.8)
+        ax_vr.set_xlabel("Squad value rank (1 = most expensive)", fontsize=9)
+        ax_vr.set_ylabel("Squad value (€m)", fontsize=9)
+        ax_vr.set_title("Squad value drops fast at the top, flattens at the bottom", fontsize=10)
+        ax_vr.set_xticks(range(1, 21))
+        ax_vr.legend(fontsize=8)
+        ax_vr.grid(alpha=0.15)
+        plt.tight_layout()
+        st.pyplot(fig_vr)
+        plt.close()
