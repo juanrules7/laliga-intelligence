@@ -316,6 +316,55 @@ def build_pre_season_accuracy(_overperf):
     return pd.DataFrame(rows)
 
 
+@st.cache_data
+def load_squad_data():
+    """Join squad_stats (age, minutes) with player_values (market value)."""
+    try:
+        ss = pd.read_csv("squad_stats.csv")
+        ss["player_id"] = ss["player_id"].astype(str)
+    except FileNotFoundError:
+        return pd.DataFrame()
+
+    try:
+        pv = pd.read_csv("player_values.csv")
+        pv["player_id"] = pv["player_id"].astype(str)
+        ss = ss.merge(
+            pv[["player_id", "season", "team", "value_m"]],
+            on=["player_id", "season", "team"],
+            how="left",
+        )
+    except FileNotFoundError:
+        ss["value_m"] = None
+
+    def _band(age):
+        if pd.isna(age):
+            return "Unknown"
+        if age <= 23:
+            return "Development (≤23)"
+        if age <= 30:
+            return "Peak (24–30)"
+        return "Veteran (31+)"
+
+    ss["age_band"] = ss["age"].apply(_band)
+    return ss
+
+
+@st.cache_data
+def load_transfer_fees():
+    """Real transfer fees scraped from Transfermarkt (collect_transfer_fees.py)."""
+    try:
+        tf = pd.read_csv("transfer_fees.csv")
+        tf["team"] = tf["team"].replace({
+            "CD Leganés":            "Leganes",
+            "RCD Espanyol Barcelona": "Espanyol",
+            "Real Valladolid CF":    "Real Valladolid",
+        })
+        return tf
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["season", "team", "direction", "player_id", "player_name",
+                                      "age", "other_club", "fee_type", "fee_eur", "fee_m"])
+
+
 @st.cache_resource
 def train_model(_tm):
     FEATURES = [
@@ -427,6 +476,8 @@ wages        = load_wages()
 pred_corrs   = build_predictive_correlations(overperf, wages)
 justice_table = build_justice_table(overperf)
 preseas_acc   = build_pre_season_accuracy(overperf)
+squad_data     = load_squad_data()
+transfer_fees  = load_transfer_fees()
 seasons_available = sorted(tm["season"].unique(), reverse=True)
 
 # ── sidebar ──────────────────────────────────────────────────────────────
@@ -539,10 +590,9 @@ else:
 st.divider()
 
 # ── tabs ─────────────────────────────────────────────────────────────────
-# NOTE: this is a deliberately trimmed public build — only Article 1's tab,
-# plus Group 1 of Article 2, are included. The rest of Article 2 (Groups 2-4)
-# and Articles 3-6 unlock here as each is published; see dashboard.py in the
-# private dev repo for the full version.
+# NOTE: this is a deliberately trimmed public build — Article 1, plus Groups
+# 1-2 of Article 2 (Groups 3-4 unlock here as their articles publish); see
+# dashboard.py in the private dev repo for the full version.
 tab1, tab2 = st.tabs(["Article 1 — Framework", "Article 2 — Clubs"])
 
 
@@ -1077,3 +1127,473 @@ with tab2:
         plt.tight_layout()
         st.pyplot(fig_vr)
         plt.close()
+
+    if squad_data.empty:
+        st.warning(
+            "No squad stats yet. Run:  \n"
+            "```\ncd D:\\ManagerSacking\npython collect_squad_stats.py\n```\n"
+            "Takes ~10 minutes (160 Transfermarkt pages). "
+            "The file saves checkpoints so you can resume if interrupted."
+        )
+    else:
+        st.divider()
+        st.markdown("#### Youth Pipeline")
+        st.caption(
+            "Players who were aged ≤23 at a club at some point in our dataset "
+            "AND still at that same club once they turned 24+."
+        )
+
+        if not squad_data.empty:
+            _pc = (
+                squad_data.dropna(subset=["age"])
+                .groupby(["player_id", "team"])
+                .agg(
+                    min_age      = ("age", "min"),
+                    max_age      = ("age", "max"),
+                    seasons_held = ("season", "nunique"),
+                    player_name  = ("player_name", "first"),
+                )
+                .reset_index()
+            )
+
+            _grads = _pc[
+                (_pc["min_age"] <= 23) &
+                (_pc["max_age"] >= 24) &
+                (_pc["seasons_held"] >= 2)
+            ].copy()
+
+            _team_seasons = squad_data.groupby("team")["season"].nunique().reset_index(name="n_seasons")
+
+            _pipe = (
+                _grads.groupby("team")
+                .agg(graduates=("player_id", "count"))
+                .reset_index()
+            )
+            _pipe = _pipe.merge(_team_seasons, on="team", how="left")
+            _pipe = _pipe[_pipe["n_seasons"] >= 3].copy()  # need enough seasons for "retained to 24+" to even be measurable
+            _pipe["graduates_per_season"] = _pipe["graduates"] / _pipe["n_seasons"]
+            _pipe = _pipe.sort_values("graduates_per_season", ascending=False)
+
+            fig, ax = plt.subplots(figsize=(12, 5))
+            _bar_cols = [
+                "#2ecc71" if t == selected_team else "#3498db"
+                for t in _pipe["team"]
+            ]
+            bars = ax.bar(_pipe["team"], _pipe["graduates_per_season"],
+                          color=_bar_cols, edgecolor="white", alpha=0.87)
+            for bar, row in zip(bars, _pipe.itertuples()):
+                ax.text(bar.get_x() + bar.get_width() / 2, row.graduates_per_season + 0.02,
+                        f"{row.graduates_per_season:.2f}\n({row.graduates}/{row.n_seasons}s)",
+                        ha="center", va="bottom", fontsize=6.5)
+            ax.set_ylabel("Players developed from ≤23 → 24+, per season in the dataset", fontsize=9)
+            ax.set_title("Youth pipeline (2018–2025)", fontsize=10)
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor", fontsize=8)
+            ax.grid(axis="y", alpha=0.18)
+            if selected_team in _pipe["team"].values:
+                ax.annotate(
+                    f"← {selected_team}",
+                    xy=(list(_pipe["team"]).index(selected_team),
+                        _pipe[_pipe.team == selected_team]["graduates_per_season"].values[0]),
+                    fontsize=8, color="#1e8449", xytext=(5, 5),
+                    textcoords="offset points",
+                )
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+
+        st.divider()
+        st.markdown("#### Development Output")
+        st.caption(
+            "For each player aged ≤23 with recorded minutes at a club, "
+            "we measure how much their market value changed the following season. "
+            "**Value growth per 90 min** reveals which clubs actually improve players — "
+            "not just play them."
+        )
+
+        # Next-season value lookup built from squad_data itself
+        _pv_all  = squad_data.dropna(subset=["value_m"])
+        _pv_next = (
+            _pv_all.groupby(["player_id", "season"])["value_m"]
+            .max()
+            .reset_index()
+            .rename(columns={"value_m": "next_val"})
+        )
+        _pv_next["prev_season"] = _pv_next["season"] - 1
+
+        _u23 = squad_data[
+            squad_data["age"].notna() &
+            (squad_data["age"] <= 23) &
+            squad_data["minutes"].notna() &
+            (squad_data["minutes"] > 0) &
+            squad_data["value_m"].notna()
+        ].copy()
+
+        _u23 = _u23.merge(
+            _pv_next[["player_id", "prev_season", "next_val"]].rename(
+                columns={"prev_season": "season"}
+            ),
+            on=["player_id", "season"],
+            how="inner",
+        )
+
+        if not _u23.empty:
+            _u23["growth"]    = _u23["next_val"] - _u23["value_m"]
+            _u23["growth_p90"] = _u23["growth"] / (_u23["minutes"] / 90)
+            _u23 = _u23[_u23["growth_p90"].abs() <= 8]  # drop extreme outliers
+
+            _dev_club = (
+                _u23.groupby("team")
+                .agg(
+                    avg_g90      = ("growth_p90", "mean"),
+                    n_players    = ("player_id",  "nunique"),
+                    total_mins   = ("minutes",    "sum"),
+                    total_growth = ("growth",     "sum"),
+                )
+                .reset_index()
+                .sort_values("avg_g90", ascending=False)
+            )
+
+            c_d1, c_d2 = st.columns(2)
+
+            with c_d1:
+                st.markdown("**Development efficiency — €m value growth per 90 min (≤23 players)**")
+                st.caption("Averaged across all seasons. Which clubs convert youth minutes into market value?")
+                _cols_de = ["#e74c3c" if t == selected_team else "#2ecc71"
+                            for t in _dev_club["team"]]
+                fig, ax = plt.subplots(figsize=(6, 5))
+                ax.barh(_dev_club["team"][::-1], _dev_club["avg_g90"][::-1],
+                        color=_cols_de[::-1], edgecolor="white", alpha=0.87)
+                ax.axvline(0, color="black", lw=0.8, alpha=0.4)
+                ax.set_xlabel("Avg €m growth per 90 min (≤23 players)", fontsize=9)
+                ax.set_title("Who extracts the most development value from youth minutes?", fontsize=9)
+                ax.tick_params(axis="y", labelsize=7)
+                ax.grid(axis="x", alpha=0.15)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+            with c_d2:
+                st.markdown("**Youth minutes vs total value growth (scatter)**")
+                st.caption("x = total youth (≤23) minutes across all seasons  ·  y = total value growth of those players")
+                _other_d = _dev_club[_dev_club["team"] != selected_team]
+                _sel_d   = _dev_club[_dev_club["team"] == selected_team]
+                fig, ax = plt.subplots(figsize=(6, 5))
+                ax.scatter(_other_d["total_mins"], _other_d["total_growth"],
+                           c="#3498db", alpha=0.7, s=60, edgecolors="white", zorder=3)
+                if not _sel_d.empty:
+                    ax.scatter(_sel_d["total_mins"], _sel_d["total_growth"],
+                               c="#e74c3c", alpha=0.95, s=110, edgecolors="white",
+                               zorder=5, label=selected_team)
+                for _, dr in _dev_club.iterrows():
+                    ax.annotate(
+                        dr["team"][:3].upper(),
+                        (dr["total_mins"], dr["total_growth"]),
+                        fontsize=6.5, xytext=(3, 3), textcoords="offset points",
+                        color="#2c3e50", alpha=0.85, zorder=4,
+                    )
+                ax.axhline(0, color="grey", lw=0.8, ls="--", alpha=0.4)
+                ax.set_xlabel("Total youth (≤23) minutes — all seasons", fontsize=9)
+                ax.set_ylabel("Total value growth of those players (€m)", fontsize=9)
+                ax.set_title("Youth investment vs development return", fontsize=9)
+                if not _sel_d.empty:
+                    ax.legend(fontsize=8)
+                ax.grid(alpha=0.1)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+            st.divider()
+            st.markdown('#### Youth "Grade-Out" Rate')
+            st.caption(
+                "Of all players who arrived at a club aged ≤23 and stayed 2+ seasons, what % eventually "
+                "broke into meaningful minutes (1,000+ in a single season) while still there?"
+            )
+            _go = squad_data.dropna(subset=["age"]).copy()
+            _go_first = _go.sort_values("season").groupby(["player_id", "team"]).first().reset_index()
+            _go_first = _go_first[_go_first["age"] <= 23][["player_id", "team"]]
+            _go_seasons = _go.groupby(["player_id", "team"])["season"].nunique().reset_index(name="n_seasons")
+            _go_eligible = _go_first.merge(_go_seasons, on=["player_id", "team"])
+            _go_eligible = _go_eligible[_go_eligible["n_seasons"] >= 2]
+
+            _go_max_mins = _go.groupby(["player_id", "team"])["minutes"].max().reset_index(name="max_minutes")
+            _go_eligible = _go_eligible.merge(_go_max_mins, on=["player_id", "team"])
+            _go_eligible["graded_out"] = _go_eligible["max_minutes"] >= 1000
+
+            _go_rate = (
+                _go_eligible.groupby("team")
+                .agg(n_eligible=("graded_out", "count"), n_graded=("graded_out", "sum"))
+                .reset_index()
+            )
+            _go_rate = _go_rate[_go_rate["n_eligible"] >= 5]
+            _go_rate["rate"] = _go_rate["n_graded"] / _go_rate["n_eligible"] * 100
+            _go_rate = _go_rate.sort_values("rate", ascending=False)
+
+            if not _go_rate.empty:
+                _cols_go = ["#e74c3c" if t == selected_team else "#2ecc71" for t in _go_rate["team"]]
+                fig, ax = plt.subplots(figsize=(9, max(4, len(_go_rate) * 0.35)))
+                ax.barh(_go_rate["team"][::-1], _go_rate["rate"][::-1],
+                        color=_cols_go[::-1], edgecolor="white", alpha=0.88)
+                ax.set_xlabel("% of eligible youth players who reached 1,000+ minutes in a season", fontsize=9)
+                ax.set_title("Youth grade-out rate (clubs with 5+ eligible players)", fontsize=10)
+                ax.grid(axis="x", alpha=0.15)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+            else:
+                st.info("Not enough qualifying players to compute this across clubs.")
+
+            # ── Does developing players actually pay off economically? ──
+            st.divider()
+            st.markdown("**Does playing youth minutes actually pay off — in money or results?**")
+            st.caption(
+                "Per club, career-long: **share of total squad minutes given to ≤23 players**, averaged "
+                "across its whole history in the dataset, plotted against two separate payoffs — **total "
+                "career transfer sale revenue** (the financial case, from actual Transfermarkt fees) and "
+                "**career-average manager skill** (the results case), every club with at least 4 seasons "
+                "of data."
+            )
+            _all_mins_career = squad_data[squad_data["minutes"].notna()].groupby(
+                "team"
+            )["minutes"].sum().reset_index(name="total_minutes")
+            _youth_mins_career = squad_data[
+                squad_data["age"].notna() & (squad_data["age"] <= 23) & squad_data["minutes"].notna()
+            ].groupby("team")["minutes"].sum().reset_index(name="youth_minutes")
+            _n_seasons_dev = squad_data[squad_data["minutes"].notna()].groupby("team")["season"].nunique().reset_index(name="n_seasons")
+            _dev_by_club = _all_mins_career.merge(_youth_mins_career, on="team", how="left")
+            _dev_by_club["youth_minutes"] = _dev_by_club["youth_minutes"].fillna(0)
+            _dev_by_club["youth_share"] = _dev_by_club["youth_minutes"] / _dev_by_club["total_minutes"] * 100
+            _dev_by_club = _dev_by_club.merge(_n_seasons_dev, on="team")
+
+            _tf_known_eco = transfer_fees.dropna(subset=["fee_m"])
+            _sale_rev_career = _tf_known_eco[_tf_known_eco["direction"] == "departure"].groupby(
+                "team"
+            )["fee_m"].sum().reset_index(name="sale_revenue")
+
+            _skill_career = overperf.groupby("team")["manager_skill_xpts"].mean().reset_index(name="career_skill")
+            _n_seasons_skill = overperf.groupby("team").size().reset_index(name="n_overperf_seasons")
+            _skill_career = _skill_career.merge(_n_seasons_skill, on="team")
+
+            _econ = _dev_by_club.merge(_sale_rev_career, on="team", how="inner")
+            _econ = _econ.merge(_skill_career, on="team", how="inner")
+            _econ = _econ[(_econ["n_seasons"] >= 4) & (_econ["n_overperf_seasons"] >= 4)]
+
+            if len(_econ) >= 10:
+                c_e1, c_e2 = st.columns(2)
+                with c_e1:
+                    _r_eg, _p_eg = stats.pearsonr(_econ["youth_share"], _econ["sale_revenue"])
+                    fig, ax = plt.subplots(figsize=(6, 5))
+                    ax.scatter(_econ["youth_share"], _econ["sale_revenue"], color="#8e44ad",
+                               alpha=0.6, s=50, edgecolors="white", zorder=3)
+                    _sl, _in = np.polyfit(_econ["youth_share"], _econ["sale_revenue"], 1)
+                    _xr = np.linspace(_econ["youth_share"].min(), _econ["youth_share"].max(), 50)
+                    ax.plot(_xr, _sl*_xr+_in, color="grey", lw=1.5, ls="--", alpha=0.7)
+                    ax.axhline(0, color="black", lw=0.6, alpha=0.3)
+                    ax.set_xlabel("Career share of squad minutes given to ≤23 players (%)", fontsize=9)
+                    ax.set_ylabel("Total career sale revenue (€m)", fontsize=9)
+                    ax.set_title(f"Youth minutes vs. money made — career-long  (r={_r_eg:.2f}, p={_p_eg:.3f})", fontsize=9)
+                    ax.grid(alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+                with c_e2:
+                    _r_es, _p_es = stats.pearsonr(_econ["youth_share"], _econ["career_skill"])
+                    fig, ax = plt.subplots(figsize=(6, 5))
+                    ax.scatter(_econ["youth_share"], _econ["career_skill"], color="#2980b9",
+                               alpha=0.6, s=50, edgecolors="white", zorder=3)
+                    _sl2, _in2 = np.polyfit(_econ["youth_share"], _econ["career_skill"], 1)
+                    _xr2 = np.linspace(_econ["youth_share"].min(), _econ["youth_share"].max(), 50)
+                    ax.plot(_xr2, _sl2*_xr2+_in2, color="grey", lw=1.5, ls="--", alpha=0.7)
+                    ax.axhline(0, color="black", lw=0.6, alpha=0.3)
+                    ax.set_xlabel("Career share of squad minutes given to ≤23 players (%)", fontsize=9)
+                    ax.set_ylabel("Career-average manager skill (xPts vs. budget)", fontsize=9)
+                    ax.set_title(f"Youth minutes vs. results — career-long  (r={_r_es:.2f}, p={_p_es:.3f})", fontsize=9)
+                    ax.grid(alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
+                _sig_eg = "a real relationship" if _p_eg < 0.05 else "not statistically significant"
+                _sig_es = "a real relationship" if _p_es < 0.05 else "not statistically significant"
+                st.caption(
+                    f"**Money: r={_r_eg:.2f}, p={_p_eg:.3f}** against career sale revenue ({_sig_eg}, "
+                    f"n={len(_econ)} clubs). **Results: r={_r_es:.2f}, p={_p_es:.3f}** against career manager "
+                    f"skill ({_sig_es})."
+                )
+            else:
+                st.info("Not enough overlapping data to test this relationship yet.")
+
+            # ── Is growing your own actually worth it vs buying? ──
+            st.divider()
+            st.markdown("**How long does growing your own actually take?**")
+            st.caption(
+                "Of every player who broke through to a 1,000+ minute season, how many years after their "
+                "first appearance did it happen?"
+            )
+
+            _tf_known = transfer_fees.dropna(subset=["fee_m"])
+            _arr = _tf_known[_tf_known["direction"] == "arrival"].groupby(["team", "season"])["fee_m"].sum().reset_index(name="spend_in")
+            _dep = _tf_known[_tf_known["direction"] == "departure"].groupby(["team", "season"])["fee_m"].sum().reset_index(name="spend_out")
+            _ns = _arr.merge(_dep, on=["team", "season"], how="outer").fillna(0)
+            _ns["net_spend_real"] = _ns["spend_in"] - _ns["spend_out"]
+            _ns = _ns.merge(overperf[["team", "season", "manager_skill_xpts", "squad_value_m"]], on=["team", "season"], how="inner")
+
+            if len(_ns) >= 15:
+                _r_ns, _p_ns = stats.pearsonr(_ns["net_spend_real"], _ns["manager_skill_xpts"])
+                _ns["bucket"] = pd.qcut(_ns["net_spend_real"], 3, labels=["Net sellers / grow-your-own", "Middle", "Heavy net buyers"])
+                _bucket_agg = _ns.groupby("bucket")["manager_skill_xpts"].agg(mean_skill="mean", n="count").reset_index()
+
+                # ── How long does "growing your own" actually take? ──
+                _go2 = squad_data.dropna(subset=["age"]).copy()
+                _first2 = _go2.sort_values("season").groupby(["player_id", "team"]).first().reset_index()
+                _first2 = _first2[_first2["age"] <= 23][["player_id", "team", "season"]].rename(columns={"season": "first_season"})
+                _seasons2 = _go2.groupby(["player_id", "team"])["season"].nunique().reset_index(name="n_seasons")
+                _elig2 = _first2.merge(_seasons2, on=["player_id", "team"])
+                _elig2 = _elig2[_elig2["n_seasons"] >= 2]
+                _crossed2 = _go2[_go2["minutes"] >= 1000].groupby(["player_id", "team"])["season"].min().reset_index(name="graded_season")
+                _elig2 = _elig2.merge(_crossed2, on=["player_id", "team"], how="left")
+                _elig2["years_to_grade"] = _elig2["graded_season"] - _elig2["first_season"]
+                _graded2 = _elig2.dropna(subset=["years_to_grade"])
+
+                if not _graded2.empty:
+                    _yrs_counts = _graded2["years_to_grade"].value_counts().sort_index()
+                    fig, ax = plt.subplots(figsize=(8, 5))
+                    ax.bar(_yrs_counts.index.astype(int).astype(str), _yrs_counts.values,
+                           color="#2980b9", edgecolor="white", alpha=0.88)
+                    ax.set_xlabel("Years from first appearance to 1,000+ min season", fontsize=9)
+                    ax.set_ylabel("Number of players", fontsize=9)
+                    ax.set_title(f"How long does 'growing your own' actually take?  (n={len(_graded2)})", fontsize=9)
+                    ax.grid(axis="y", alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
+                # ── Actual trading profit: developed/free vs. bought-and-resold ──
+                st.markdown("**The direct financial test: actual profit from reselling players**")
+                st.caption(
+                    "For every player who arrived and later left the same club (real fees on both ends), "
+                    "profit = sale fee minus purchase fee (arrivals with no fee — free, loan, or academy — "
+                    "have a €0 cost basis)."
+                )
+                _arr_tf = transfer_fees[transfer_fees["direction"] == "arrival"][
+                    ["player_id", "team", "season", "age", "fee_type", "fee_m"]
+                ].rename(columns={"season": "arrival_season", "age": "arrival_age",
+                                   "fee_type": "arrival_fee_type", "fee_m": "arrival_fee"})
+                _arr_tf["player_id"] = _arr_tf["player_id"].astype(str)
+                # Only permanent/free departures are a real exit — a loan departure is temporary,
+                # not the club losing the player (see caveat above).
+                _dep_tf = transfer_fees[
+                    (transfer_fees["direction"] == "departure") &
+                    (transfer_fees["fee_type"].isin(["permanent", "free"]))
+                ][["player_id", "team", "season", "fee_m"]].rename(columns={"season": "departure_season", "fee_m": "departure_fee"})
+                _dep_tf["player_id"] = _dep_tf["player_id"].astype(str)
+
+                _trade = _arr_tf.merge(_dep_tf, on=["player_id", "team"], how="inner")
+                _trade = _trade[_trade["departure_season"] > _trade["arrival_season"]]
+                _trade = _trade.sort_values("departure_season").groupby(
+                    ["player_id", "team", "arrival_season"]
+                ).first().reset_index()
+                _trade = _trade.dropna(subset=["departure_fee"])
+                _trade["realized"] = True
+
+                # A loan-tagged arrival only counts as a genuine "returning loanee" if this
+                # player was already at this same club in an earlier season — otherwise it's
+                # a real loan-in from another club, not the club's own player coming home.
+                _first_season_at_team = squad_data.groupby(["player_id", "team"])["season"].min().to_dict()
+
+                def _is_returning_loan(row):
+                    _first = _first_season_at_team.get((row["player_id"], row["team"]))
+                    return _first is not None and _first < row["arrival_season"]
+
+                def _classify_trade(row):
+                    if row["arrival_fee_type"] in ("free", "unknown") and row["arrival_age"] <= 21:
+                        return "Developed/free\n(young, no fee in)"
+                    elif row["arrival_fee_type"] == "permanent" and row["arrival_age"] <= 23:
+                        return "Bought young (≤23),\nresold"
+                    elif row["arrival_fee_type"] == "permanent":
+                        return "Bought established (24+),\nresold"
+                    elif row["arrival_fee_type"] == "loan" and _is_returning_loan(row):
+                        return "Returning loanee,\nlater resold"
+                    else:
+                        return "Other"
+
+                def _is_genuine_loan_in(row):
+                    # A loan-tagged arrival that ISN'T a returning loanee is a real loan-in
+                    # from another club — a fundamentally different, temporary arrangement,
+                    # not an "acquisition" in the sense this chart is measuring. Excluded
+                    # entirely below, not folded into "Other."
+                    return row["arrival_fee_type"] == "loan" and not _is_returning_loan(row)
+
+                if not _trade.empty:
+                    # ── Long-term extension: players never (yet) permanently sold ──
+                    # A player bought young who's still at the club isn't a failure just because
+                    # there's no resale to measure. If his current market value is well above what
+                    # was paid, that's real value the club is holding — just unrealized, not a "loss."
+                    _sold_keys = set(zip(_trade["player_id"], _trade["team"], _trade["arrival_season"]))
+                    _arr_tf["_key"] = list(zip(_arr_tf["player_id"], _arr_tf["team"], _arr_tf["arrival_season"]))
+                    _unsold = _arr_tf[~_arr_tf["_key"].isin(_sold_keys)].drop(columns=["_key"]).copy()
+
+                    _latest_season = squad_data["season"].max()
+                    _current_val = squad_data.dropna(subset=["value_m"])
+                    _current_val = _current_val[_current_val["season"] == _latest_season][["player_id", "team", "value_m"]].copy()
+                    _current_val["player_id"] = _current_val["player_id"].astype(str)
+
+                    _still_held = _unsold.merge(_current_val, on=["player_id", "team"], how="inner")
+                    _still_held = _still_held.rename(columns={"value_m": "departure_fee"})
+                    _still_held["departure_season"] = _latest_season + 1
+                    _still_held["realized"] = False
+
+                    _trade_lt = pd.concat([_trade, _still_held], ignore_index=True)
+                    _trade_lt["category"] = _trade_lt.apply(_classify_trade, axis=1)
+                    _trade_lt["cost_basis"] = _trade_lt["arrival_fee"].where(_trade_lt["arrival_fee_type"] == "permanent", 0).fillna(0)
+                    _trade_lt["profit"] = _trade_lt["departure_fee"] - _trade_lt["cost_basis"]
+                    _trade_lt["years_held"] = (_trade_lt["departure_season"] - _trade_lt["arrival_season"]).clip(lower=1)
+                    _trade_lt["profit_per_year"] = _trade_lt["profit"] / _trade_lt["years_held"]
+
+                    # keep the original realized-only view too (used by the buy/sell-by-age
+                    # section further down, which is about a real completed transaction's timing)
+                    _trade["category"] = _trade.apply(_classify_trade, axis=1)
+                    _trade["cost_basis"] = _trade["arrival_fee"].where(_trade["arrival_fee_type"] == "permanent", 0).fillna(0)
+                    _trade["profit"] = _trade["departure_fee"] - _trade["cost_basis"]
+                    _trade["years_held"] = (_trade["departure_season"] - _trade["arrival_season"]).clip(lower=1)
+                    _trade["profit_per_year"] = _trade["profit"] / _trade["years_held"]
+
+                    _trade_lt_for_chart = _trade_lt[~_trade_lt.apply(_is_genuine_loan_in, axis=1)]
+                    _trade_summary = _trade_lt_for_chart.groupby("category").agg(
+                        n=("profit", "count"), avg_profit=("profit", "mean"),
+                        avg_profit_yr=("profit_per_year", "mean"), avg_years=("years_held", "mean"),
+                        pct_realized=("realized", "mean"),
+                    ).reset_index().sort_values("avg_profit_yr", ascending=False)
+
+                    _cols_tp = ["#2ecc71" if v >= 0 else "#e74c3c" for v in _trade_summary["avg_profit_yr"]]
+                    fig, ax = plt.subplots(figsize=(11, 5))
+                    bars = ax.barh(_trade_summary["category"], _trade_summary["avg_profit_yr"],
+                                   color=_cols_tp, edgecolor="white", alpha=0.88)
+                    ax.axvline(0, color="black", lw=0.8, alpha=0.5)
+                    _rng_tp = max(abs(_trade_summary["avg_profit_yr"].max()), abs(_trade_summary["avg_profit_yr"].min()), 0.1)
+                    ax.set_xlim(_trade_summary["avg_profit_yr"].min() - _rng_tp * 1.6, _trade_summary["avg_profit_yr"].max() + _rng_tp * 1.6)
+                    for bar, row in zip(bars, _trade_summary.itertuples()):
+                        ax.text(row.avg_profit_yr + (_rng_tp*0.08 if row.avg_profit_yr >= 0 else -_rng_tp*0.08), bar.get_y()+bar.get_height()/2,
+                                f"€{row.avg_profit_yr:+.1f}m/yr (n={row.n}, {row.avg_years:.1f}yrs held, {row.pct_realized*100:.0f}% sold)", va="center",
+                                ha="left" if row.avg_profit_yr >= 0 else "right", fontsize=8)
+                    ax.set_xlabel("Avg value created per player, per year held (€m)", fontsize=9)
+                    ax.set_title("Long-term value by acquisition type — per year held", fontsize=9)
+                    ax.tick_params(axis="y", labelsize=8)
+                    ax.grid(axis="x", alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
+                    _dev_row = _trade_summary[_trade_summary["category"].str.startswith("Developed")]
+                    _est_row = _trade_summary[_trade_summary["category"].str.startswith("Bought established")]
+                    if not _dev_row.empty and not _est_row.empty:
+                        st.caption(
+                            f"**Growing your own wins, even per year held.** A developed/free acquisition creates "
+                            f"an average of **€{_dev_row['avg_profit_yr'].iloc[0]:+.1f}m a year** it's held "
+                            f"(n={int(_dev_row['n'].iloc[0])}, {_dev_row['pct_realized'].iloc[0]*100:.0f}% actually sold so far). "
+                            f"Buying an established player and reselling him later loses an average of "
+                            f"**€{_est_row['avg_profit_yr'].iloc[0]:+.1f}m a year** (n={int(_est_row['n'].iloc[0])}, "
+                            f"{_est_row['pct_realized'].iloc[0]*100:.0f}% sold). "
+                            "Zoom in to a single player, though, and the financial case stops being ambiguous: "
+                            "developing your own is reliably profitable, and buying an established star and "
+                            "reselling him later reliably loses money."
+                        )
