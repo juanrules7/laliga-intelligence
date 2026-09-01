@@ -9,6 +9,55 @@ from xgboost import XGBRegressor
 
 st.set_page_config(page_title="La Liga Intelligence", layout="wide")
 
+def _short_name(name, limit=16):
+    """Shorten a manager name without cutting a word in half: use the surname
+    (last word) if the full name doesn't fit, instead of a blind char slice."""
+    name = str(name)
+    if len(name) <= limit:
+        return name
+    parts = name.split()
+    return parts[-1] if len(parts) > 1 else name[:limit]
+
+def build_value_trajectory(_squad_data):
+    """
+    For every player-season with a market value, link it to that same player's value
+    the following season (any club) and classify the outcome as up/down/flat. Also
+    computes average minutes by age as a proxy for 'peak performance' (no per-player
+    performance stats exist in the data, so playing time — a real-world signal of
+    manager trust — is the best available stand-in for on-pitch peak).
+    """
+    v = _squad_data.dropna(subset=["value_m", "age"]).copy()
+    v = v[v["value_m"] > 0]
+
+    nxt = v[["player_id", "season", "value_m"]].rename(
+        columns={"season": "season_next", "value_m": "value_next"}
+    )
+    nxt["season"] = nxt["season_next"] - 1
+
+    merged = v.merge(nxt[["player_id", "season", "value_next"]], on=["player_id", "season"], how="inner")
+    merged = merged.dropna(subset=["value_next"])
+    merged["direction"] = np.where(
+        merged["value_next"] > merged["value_m"], "up",
+        np.where(merged["value_next"] < merged["value_m"], "down", "flat")
+    )
+
+    by_age = merged.groupby(["age", "direction"]).size().unstack(fill_value=0)
+    for c in ["up", "down", "flat"]:
+        if c not in by_age.columns:
+            by_age[c] = 0
+    by_age["n"] = by_age[["up", "down", "flat"]].sum(axis=1)
+    by_age["pct_up"]   = by_age["up"]   / by_age["n"] * 100
+    by_age["pct_down"] = by_age["down"] / by_age["n"] * 100
+    by_age["pct_flat"] = by_age["flat"] / by_age["n"] * 100
+    by_age = by_age[by_age["n"] >= 15].reset_index().sort_values("age")
+
+    usage = _squad_data.dropna(subset=["age"]).copy()
+    usage["minutes"] = usage["minutes"].fillna(0)
+    usage_by_age = usage.groupby("age").agg(n_u=("minutes", "count"), avg_minutes=("minutes", "mean")).reset_index()
+    usage_by_age = usage_by_age[usage_by_age["n_u"] >= 15]
+
+    return by_age, usage_by_age
+
 # Transfer window dates shift with the season — approximate per La Liga calendar
 def get_transfer_windows(season):
     return [
@@ -478,6 +527,7 @@ justice_table = build_justice_table(overperf)
 preseas_acc   = build_pre_season_accuracy(overperf)
 squad_data     = load_squad_data()
 transfer_fees  = load_transfer_fees()
+value_by_age, usage_by_age = build_value_trajectory(squad_data) if not squad_data.empty else (pd.DataFrame(), pd.DataFrame())
 seasons_available = sorted(tm["season"].unique(), reverse=True)
 
 # ── sidebar ──────────────────────────────────────────────────────────────
@@ -1597,3 +1647,512 @@ with tab2:
                             "developing your own is reliably profitable, and buying an established star and "
                             "reselling him later reliably loses money."
                         )
+                    st.divider()
+                    st.subheader("Group 3 — Buy, Sell & Squad Economics")
+                    st.caption(
+                        "When should a club buy, and when should it sell — for any player, at any age, "
+                        "tested with real transfer fees, not squad-value proxies."
+                    )
+
+                    st.divider()
+                    st.markdown("#### Squad composition browser")
+                    st.caption(
+                        "A reference tool, not a finding — use the sidebar to pick a team and season to explore the raw "
+                        "squad data the next few groups draw their analysis from. Minutes come from Transfermarkt "
+                        "performance pages; market values from the squad valuation pages."
+                    )
+
+                    BAND_ORDER  = ["Development (≤23)", "Peak (24–30)", "Veteran (31+)"]
+                    BAND_LABELS = ["Dev (≤23)", "Peak (24–30)", "Vet (31+)"]
+                    BAND_COLS   = ["#2ecc71", "#3498db", "#e67e22"]
+                    BAND_COLORS = {
+                        "Development (≤23)": "#2ecc71",
+                        "Peak (24–30)":      "#3498db",
+                        "Veteran (31+)":     "#e67e22",
+                        "Unknown":           "#95a5a6",
+                    }
+
+                    if squad_data.empty:
+                        st.warning(
+                            "No squad stats yet. Run:  \n"
+                            "```\ncd D:\\ManagerSacking\npython collect_squad_stats.py\n```\n"
+                            "Takes ~10 minutes (160 Transfermarkt pages). "
+                            "The file saves checkpoints so you can resume if interrupted."
+                        )
+                    else:
+                        df_sq = squad_data[
+                            (squad_data["team"] == selected_team) &
+                            (squad_data["season"] == selected_season)
+                        ].dropna(subset=["age"]).copy()
+
+                        if df_sq.empty:
+                            st.info(
+                                f"No data for {selected_team} {selected_season}/{str(selected_season+1)[-2:]}. "
+                                "Either the scraper hasn't finished yet or this team wasn't in La Liga that season."
+                            )
+                        else:
+                            # ── summary metrics ───────────────────────────────────────────────
+                            has_mins = df_sq[df_sq["minutes"].notna() & (df_sq["minutes"] > 0)]
+                            if not has_mins.empty:
+                                weighted_age = float(np.average(has_mins["age"], weights=has_mins["minutes"]))
+                            else:
+                                weighted_age = float(df_sq["age"].mean())
+
+                            total_value = df_sq["value_m"].sum() if df_sq["value_m"].notna().any() else 0.0
+                            mvp_rows    = df_sq.dropna(subset=["value_m"])
+                            mvp_name    = _short_name(mvp_rows.nlargest(1, "value_m")["player_name"].iloc[0], 16) if not mvp_rows.empty else "—"
+
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Squad size", f"{len(df_sq)}")
+                            c2.metric(
+                                "Avg age (min-weighted)", f"{weighted_age:.1f}",
+                                help=(
+                                    "Weighted by minutes played, not a plain average of every squad member. "
+                                    "A player who played 3,000 minutes counts far more than one who played 50 — "
+                                    "so this reflects the age of the team that actually took the pitch, not the "
+                                    "age of the full roster on paper. Formula: Σ(age × minutes) ÷ Σ(minutes)."
+                                )
+                            )
+                            c3.metric("Total squad value", f"€{total_value:.0f}m")
+                            c4.metric("Most valuable", mvp_name)
+
+                            st.divider()
+
+                            # ── value & minutes by age band ───────────────────────────────────
+                            col_v, col_m = st.columns(2)
+
+                            with col_v:
+                                st.markdown("**Squad value by age band (€m)**")
+                                band_val = (
+                                    df_sq.groupby("age_band")["value_m"]
+                                    .sum()
+                                    .reindex(BAND_ORDER, fill_value=0)
+                                )
+                                fig, ax = plt.subplots(figsize=(5, 4))
+                                bars = ax.bar(BAND_LABELS, band_val.values,
+                                              color=BAND_COLS, edgecolor="white", alpha=0.87)
+                                band_total = band_val.sum()
+                                for bar, val in zip(bars, band_val.values):
+                                    pct = (val / band_total * 100) if band_total > 0 else 0
+                                    ax.text(bar.get_x() + bar.get_width() / 2, val + 0.5,
+                                            f"€{val:.0f}m ({pct:.0f}%)", ha="center", va="bottom",
+                                            fontsize=8, fontweight="bold")
+                                ax.set_ylabel("Total market value (€m)", fontsize=9)
+                                ax.set_title("Where is the value concentrated?", fontsize=10)
+                                ax.grid(axis="y", alpha=0.2)
+                                plt.tight_layout()
+                                st.pyplot(fig)
+                                plt.close()
+
+                            with col_m:
+                                st.markdown("**Minutes share by age band**")
+                                mins_ok = df_sq[df_sq["minutes"].notna() & (df_sq["minutes"] > 0)]
+                                if not mins_ok.empty:
+                                    band_mins = (
+                                        mins_ok.groupby("age_band")["minutes"]
+                                        .sum()
+                                        .reindex(BAND_ORDER, fill_value=0)
+                                    )
+                                    total_m = band_mins.sum()
+                                    pcts    = (band_mins / total_m * 100) if total_m > 0 else band_mins * 0
+                                    fig, ax = plt.subplots(figsize=(5, 4))
+                                    bars = ax.bar(BAND_LABELS, pcts.values,
+                                                  color=BAND_COLS, edgecolor="white", alpha=0.87)
+                                    for bar, val in zip(bars, pcts.values):
+                                        ax.text(bar.get_x() + bar.get_width() / 2, val + 0.5,
+                                                f"{val:.0f}%", ha="center", va="bottom",
+                                                fontsize=8, fontweight="bold")
+                                    ax.set_ylabel("% of total minutes played", fontsize=9)
+                                    ax.set_ylim(0, 100)
+                                    ax.set_title("Who's actually on the pitch?", fontsize=10)
+                                    ax.grid(axis="y", alpha=0.2)
+                                    plt.tight_layout()
+                                    st.pyplot(fig)
+                                    plt.close()
+                                else:
+                                    st.info("No minutes data for this selection yet.")
+
+                    # ── Optimal buy/sell age, by objective ────────────────
+                    st.divider()
+                    st.markdown("**When should you buy?**")
+                    st.caption(
+                        "Same real trade pairs as above, now split by age instead of acquisition type. Two "
+                        "different objectives give two different answers: buying for **transfer profit** "
+                        "points one way, buying for **immediate on-pitch return** points the other."
+                    )
+
+                    _trade_age = _trade.dropna(subset=["arrival_age"]).copy()
+
+                    _buy_bins    = [0, 20, 22, 24, 26, 28, 32, 99]
+                    _buy_labels  = ["≤20", "21-22", "23-24", "25-26", "27-28", "29-32", "33+"]
+
+                    _trade_age["buy_bucket"]  = pd.cut(_trade_age["arrival_age"], bins=_buy_bins, labels=_buy_labels, right=True)
+
+                    _buy_age_agg = _trade_age.groupby("buy_bucket", observed=True).agg(
+                        n=("profit_per_year", "count"), avg_profit_yr=("profit_per_year", "mean")
+                    ).reindex(_buy_labels).dropna()
+
+                    st.markdown("**Profit per year held, by age at PURCHASE**")
+                    _cols_ba = ["#2ecc71" if v >= 0 else "#e74c3c" for v in _buy_age_agg["avg_profit_yr"]]
+                    fig, ax = plt.subplots(figsize=(9, 5))
+                    bars = ax.bar(_buy_age_agg.index.astype(str), _buy_age_agg["avg_profit_yr"],
+                                  color=_cols_ba, edgecolor="white", alpha=0.88)
+                    ax.bar_label(bars, fmt="%+.2f", padding=2, fontsize=8)
+                    ax.axhline(0, color="black", lw=0.8, alpha=0.5)
+                    ax.set_xlabel("Age at purchase", fontsize=9)
+                    ax.set_ylabel("Avg profit per year held (€m)", fontsize=9)
+                    ax.set_title("Buy-side: profit by purchase age", fontsize=9)
+                    ax.tick_params(axis="x", labelsize=8)
+                    ax.grid(axis="y", alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
+                    # ── Different objective: LONG-TERM value-for-money by buy age ────
+                    # Long-term average, not the arrival season alone — a 20-year-old signing
+                    # plays less right away than a 28-year-old almost by definition, so judging
+                    # purely on the debut season biases against every young signing. This instead
+                    # averages minutes per season across the player's WHOLE tenure at the club.
+                    _arr_fee_vfm = transfer_fees[
+                        (transfer_fees["direction"] == "arrival") & transfer_fees["fee_m"].notna() &
+                        (transfer_fees["fee_m"] > 0) & transfer_fees["age"].notna()
+                    ][["player_id", "team", "season", "age", "fee_m"]].rename(columns={"season": "arrival_season"})
+                    _arr_fee_vfm["player_id"] = _arr_fee_vfm["player_id"].astype(str)
+                    _mins_ps = squad_data.dropna(subset=["minutes"])[["player_id", "team", "season", "minutes"]].copy()
+                    _mins_ps["player_id"] = _mins_ps["player_id"].astype(str)
+                    _vfm_long = _arr_fee_vfm.merge(_mins_ps, on=["player_id", "team"], how="inner")
+                    _vfm_long = _vfm_long[_vfm_long["season"] >= _vfm_long["arrival_season"]]
+                    _vfm = _vfm_long.groupby(["player_id", "team", "arrival_season", "age", "fee_m"]).agg(
+                        avg_minutes_per_season=("minutes", "mean"), n_seasons=("season", "nunique"),
+                    ).reset_index()
+                    _vfm["mins_per_eur_m"] = _vfm["avg_minutes_per_season"] / _vfm["fee_m"]
+                    _vfm["buy_bucket"] = pd.cut(_vfm["age"], bins=_buy_bins, labels=_buy_labels, right=True)
+                    _vfm_agg = _vfm.groupby("buy_bucket", observed=True).agg(
+                        n=("mins_per_eur_m", "count"), avg_mins_per_m=("mins_per_eur_m", "mean"),
+                        avg_seasons=("n_seasons", "mean"),
+                    ).reindex(_buy_labels).dropna()
+                    _vfm_agg = _vfm_agg[_vfm_agg["n"] >= 30]
+
+                    if not _vfm_agg.empty:
+                        st.markdown("**A different objective: long-term playing time per €m spent, by age at purchase**")
+                        st.caption(
+                            "How much playing time do you get for the fee, averaged per season across the "
+                            "player's *whole* tenure at the club — not just his debut season, which would "
+                            "unfairly penalize every young signing before he's had time to break in. This is "
+                            "the opposite lens from the two charts above — not 'will this be profitable to "
+                            "resell' but 'will this player actually play, over the years I own him, for what I paid.'"
+                        )
+                        fig, ax = plt.subplots(figsize=(9, 4.5))
+                        bars = ax.bar(_vfm_agg.index.astype(str), _vfm_agg["avg_mins_per_m"],
+                                      color="#2980b9", edgecolor="white", alpha=0.88)
+                        ax.bar_label(bars, fmt="%.0f", padding=2, fontsize=8)
+                        ax.set_xlabel("Age at purchase", fontsize=9)
+                        ax.set_ylabel("Avg minutes per season, per €m fee", fontsize=9)
+                        ax.set_title("Value for money: long-term playing time per euro spent", fontsize=10)
+                        ax.grid(axis="y", alpha=0.15)
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close()
+
+            else:
+                st.info("Not enough overlapping data to test buy-vs-build yet.")
+
+        st.divider()
+        st.markdown("#### Sell-High Timing — are clubs actually selling at the right age?")
+        st.caption(
+            "For every player who departed a club (in squad in season N, gone in N+1), "
+            "what age were they when they left? Clubs that routinely sell in the **peak window "
+            "(24–28)** maximise transfer income — the chart below this one tests whether that "
+            "window actually matches when a player's resale value starts falling."
+        )
+
+        _max_szn = squad_data["season"].max()
+        _last_szn = (
+            squad_data.groupby(["player_id", "team"])["season"]
+            .max().reset_index(name="last_season")
+        )
+        _last_szn = _last_szn[_last_szn["last_season"] < _max_szn]
+        _last_szn = _last_szn.merge(
+            squad_data[["player_id", "team", "season", "age"]]
+            .rename(columns={"season": "last_season"}),
+            on=["player_id", "team", "last_season"], how="left",
+        ).dropna(subset=["age"])
+
+        def _dep_band(a):
+            if a <= 23:  return "Early (≤23)"
+            if a <= 28:  return "Peak (24–28)"
+            if a <= 30:  return "Late 20s (29–30)"
+            return "Veteran (31+)"
+
+        _last_szn["dep_band"] = _last_szn["age"].apply(_dep_band)
+
+        if not _last_szn.empty:
+            _db_order = ["Early (≤23)", "Peak (24–28)", "Late 20s (29–30)", "Veteran (31+)"]
+            _db_cols  = {"Early (≤23)": "#3498db", "Peak (24–28)": "#2ecc71",
+                         "Late 20s (29–30)": "#f39c12", "Veteran (31+)": "#e74c3c"}
+
+            _dep_tally  = _last_szn.groupby(["team", "dep_band"]).size().reset_index(name="n")
+            _dep_pivot  = _dep_tally.pivot_table(
+                index="team", columns="dep_band", values="n", fill_value=0
+            ).reindex(columns=_db_order, fill_value=0)
+            _dep_pivot["total"] = _dep_pivot.sum(axis=1)
+            _dep_pct   = _dep_pivot[_db_order].div(_dep_pivot["total"], axis=0) * 100
+            _dep_pct   = _dep_pct.sort_values("Peak (24–28)", ascending=False)
+
+            fig, ax = plt.subplots(figsize=(12, 5))
+            _bot = np.zeros(len(_dep_pct))
+            for _db in _db_order:
+                ax.bar(_dep_pct.index, _dep_pct[_db].values, bottom=_bot,
+                       color=_db_cols[_db], edgecolor="white", alpha=0.87, label=_db)
+                _bot += _dep_pct[_db].values
+            if selected_team in _dep_pct.index:
+                ax.axvline(list(_dep_pct.index).index(selected_team),
+                           color="#c0392b", lw=2.2, alpha=0.65, zorder=5)
+            ax.set_ylabel("% of departures", fontsize=9)
+            ax.set_title("At what age do clubs sell / lose players? (all seasons)", fontsize=10)
+            ax.tick_params(axis="x", labelsize=8)
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+            ax.set_ylim(0, 108)
+            ax.legend(fontsize=8, loc="upper right")
+            ax.grid(axis="y", alpha=0.12)
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+
+        # ── When does resale value actually turn? ─────────────────────
+        st.divider()
+        st.markdown("**So when does a player's value actually start falling?**")
+        st.caption(
+            "For every player-season, does his market value go up or down the following year? "
+            "Plotted against average minutes played by age — the best available stand-in for "
+            "'peak performance,' since there's no per-player rating data, but minutes are a real "
+            "signal of how much a manager trusts him. *Limitation: this only counts players who "
+            "stayed in a La Liga squad the following season — anyone who dropped out entirely "
+            "(transferred down, retired, club relegated) has no next-season data point and is "
+            "excluded, which likely understates how much value the steepest decliners actually lose.*"
+        )
+        if not value_by_age.empty:
+            _vb = value_by_age.sort_values("age")
+            _crossover_rows = _vb[_vb["pct_down"] > _vb["pct_up"]]
+            _crossover_age = int(_crossover_rows["age"].iloc[0]) if not _crossover_rows.empty else None
+            # require a robust sample for the peak claim — past ~32 the sample is a small,
+            # survivor-biased tail (only durable veterans are still around to be counted),
+            # which can fake a "later peak" that's really just noise
+            _usage_robust = usage_by_age[usage_by_age["n_u"] >= 100]
+            _peak_usage_age = int(_usage_robust.loc[_usage_robust["avg_minutes"].idxmax(), "age"]) if not _usage_robust.empty else None
+
+            fig_vt, ax_vt = plt.subplots(figsize=(10, 5))
+            ax_vt.bar(_vb["age"], _vb["pct_up"], color="#2ecc71", alpha=0.85, label="% who increased in value")
+            ax_vt.bar(_vb["age"], _vb["pct_flat"], bottom=_vb["pct_up"], color="#bdc3c7", alpha=0.85, label="% unchanged")
+            ax_vt.bar(_vb["age"], _vb["pct_down"], bottom=_vb["pct_up"]+_vb["pct_flat"], color="#e74c3c", alpha=0.85, label="% who lost value")
+            ax_vt.axhline(50, color="black", lw=1, ls="--", alpha=0.6)
+            if _crossover_age is not None:
+                ax_vt.axvline(_crossover_age, color="#c0392b", lw=1.3, ls=":", alpha=0.8)
+                ax_vt.text(_crossover_age + 0.15, 96, f"age {_crossover_age}:\nmore lose than gain",
+                           fontsize=7.5, color="#c0392b", va="top")
+            ax_vt.set_xlabel("Age", fontsize=9)
+            ax_vt.set_ylabel("% of players (value outcome next season)", fontsize=9)
+            ax_vt.set_ylim(0, 100)
+
+            ax_use = ax_vt.twinx()
+            _ub = usage_by_age.sort_values("age")
+            ax_use.plot(_ub["age"], _ub["avg_minutes"], color="#2c3e50", lw=2.6, marker="o",
+                        markersize=4, label="Avg minutes played (performance-trust proxy)")
+            if _peak_usage_age is not None:
+                ax_use.axvline(_peak_usage_age, color="#2c3e50", lw=1.3, ls=":", alpha=0.7)
+                ax_use.text(_peak_usage_age + 0.15, _ub["avg_minutes"].max()*0.98,
+                            f"age {_peak_usage_age}:\npeak trust/usage",
+                            fontsize=7.5, color="#2c3e50", va="top")
+            ax_use.set_ylabel("Avg minutes played that season", fontsize=9, color="#2c3e50")
+            ax_use.tick_params(axis="y", labelcolor="#2c3e50")
+            ax_use.set_ylim(0, _ub["avg_minutes"].max()*1.15)
+
+            lines1, labels1 = ax_vt.get_legend_handles_labels()
+            lines2, labels2 = ax_use.get_legend_handles_labels()
+            ax_vt.legend(lines1+lines2, labels1+labels2, fontsize=7.5, loc="upper left", ncol=1)
+            ax_vt.set_title("Value outcome vs. playing-time trust, by age", fontsize=10)
+            plt.tight_layout()
+            st.pyplot(fig_vt)
+            plt.close()
+
+        st.divider()
+        st.markdown("**Loaning players out — does it actually help?**")
+        st.caption(
+            "For every player a club sent out on loan (a real departure record with fee type 'loan'): "
+            "does his value grow, does he ever come back and play, and if he's eventually sold for good, "
+            "does the club make money on it?"
+        )
+        _loan_out = transfer_fees[
+            (transfer_fees["direction"] == "departure") & (transfer_fees["fee_type"] == "loan")
+        ][["player_id", "team", "season", "age"]].rename(columns={"season": "loan_season"}).drop_duplicates(
+            subset=["player_id", "team", "loan_season"]
+        )
+        _loan_out["player_id"] = _loan_out["player_id"].astype(str)
+        _loan_bins   = [0, 20, 23, 27, 99]
+        _loan_labels = ["≤20", "21-23", "24-27", "28+"]
+        _loan_out["age_bucket"] = pd.cut(_loan_out["age"], bins=_loan_bins, labels=_loan_labels)
+
+        if len(_loan_out) >= 30:
+            _sq_val = squad_data.dropna(subset=["value_m"])[["player_id", "team", "season", "value_m"]].copy()
+            _sq_val["player_id"] = _sq_val["player_id"].astype(str)
+
+            # value right before the loan (last known value at the parent club, up to the loan season)
+            _before = _sq_val.rename(columns={"season": "season_b", "value_m": "value_before"})
+            _vb = _loan_out.merge(_before, left_on=["player_id", "team"], right_on=["player_id", "team"])
+            _vb = _vb[_vb["season_b"] <= _vb["loan_season"]].sort_values("season_b").groupby(
+                ["player_id", "team", "loan_season"]).last().reset_index()
+
+            # value at the NEXT point we see this player anywhere (any club) after the loan season
+            _after_pool = squad_data.dropna(subset=["value_m"])[["player_id", "team", "season", "value_m"]].copy()
+            _after_pool["player_id"] = _after_pool["player_id"].astype(str)
+
+            def _next_value(row):
+                later = _after_pool[(_after_pool.player_id == row.player_id) & (_after_pool.season > row.loan_season)]
+                if later.empty:
+                    return pd.Series({"value_after": np.nan})
+                return pd.Series({"value_after": later.sort_values("season").iloc[0]["value_m"]})
+
+            _vchg = _vb.merge(_vb.apply(_next_value, axis=1), left_index=True, right_index=True)
+            _vchg = _vchg.dropna(subset=["value_before", "value_after"])
+            _vchg = _vchg[_vchg["value_before"] > 0]
+            _vchg["pct_change"] = (_vchg["value_after"] - _vchg["value_before"]) / _vchg["value_before"] * 100
+
+            # does the player return to the PARENT club's squad afterward?
+            _sq_presence = squad_data[["player_id", "team", "season"]].drop_duplicates().copy()
+            _sq_presence["player_id"] = _sq_presence["player_id"].astype(str)
+
+            def _returned(row):
+                later = _sq_presence[
+                    (_sq_presence.player_id == row.player_id) & (_sq_presence.team == row.team) &
+                    (_sq_presence.season > row.loan_season)
+                ]
+                return len(later) > 0
+
+            _loan_out["returned"] = _loan_out.apply(_returned, axis=1)
+
+            # eventual permanent/free sale after the loan, and its profit (same cost-basis logic as elsewhere)
+            _perm_dep = transfer_fees[
+                (transfer_fees["direction"] == "departure") & (transfer_fees["fee_type"].isin(["permanent", "free"]))
+            ][["player_id", "team", "season", "fee_m"]].rename(columns={"season": "sale_season", "fee_m": "sale_fee"})
+            _perm_dep["player_id"] = _perm_dep["player_id"].astype(str)
+            _arr_for_loan = transfer_fees[transfer_fees["direction"] == "arrival"][
+                ["player_id", "team", "season", "fee_type", "fee_m"]
+            ].rename(columns={"season": "arrival_season", "fee_type": "arrival_fee_type", "fee_m": "arrival_fee"})
+            _arr_for_loan["player_id"] = _arr_for_loan["player_id"].astype(str)
+
+            _sold = _loan_out.merge(_perm_dep, on=["player_id", "team"], how="inner")
+            _sold = _sold[_sold["sale_season"] > _sold["loan_season"]]
+            _sold = _sold.sort_values("sale_season").groupby(["player_id", "team", "loan_season"]).first().reset_index()
+            _sold = _sold.merge(_arr_for_loan, on=["player_id", "team"], how="inner")
+            _sold = _sold[_sold["arrival_season"] <= _sold["loan_season"]]
+            _sold = _sold.sort_values("arrival_season").groupby(["player_id", "team", "loan_season"]).first().reset_index()
+            _sold["cost_basis"] = _sold["arrival_fee"].where(_sold["arrival_fee_type"] == "permanent", 0).fillna(0)
+            _sold["profit"] = _sold["sale_fee"] - _sold["cost_basis"]
+
+            c_lo1, c_lo2 = st.columns(2)
+            with c_lo1:
+                if len(_vchg) >= 20:
+                    fig, ax = plt.subplots(figsize=(6, 5))
+                    _vals_lo = [_vchg["pct_change"].mean(), _vchg["pct_change"].median()]
+                    _cols_lo = ["#2ecc71" if v >= 0 else "#e74c3c" for v in _vals_lo]
+                    bars = ax.bar(["Average", "Median"], _vals_lo, color=_cols_lo, edgecolor="white", alpha=0.88)
+                    ax.bar_label(bars, fmt="%+.0f%%", padding=2, fontsize=9)
+                    ax.axhline(0, color="black", lw=0.8, alpha=0.5)
+                    ax.set_ylabel("% change in market value after loan-out", fontsize=9)
+                    ax.set_title(f"Value change after being loaned out (n={len(_vchg)})", fontsize=9)
+                    ax.grid(axis="y", alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+            with c_lo2:
+                _pct_returned = _loan_out["returned"].mean() * 100
+                _pct_sold_after = len(_sold.drop_duplicates(["player_id", "team", "loan_season"])) / len(_loan_out) * 100
+                fig, ax = plt.subplots(figsize=(6, 5))
+                _outcomes = ["Returns to\nplay for parent club", "Eventually sold\nfor good"]
+                _outvals = [_pct_returned, _pct_sold_after]
+                ax.bar(_outcomes, _outvals, color=["#3498db", "#e67e22"], edgecolor="white", alpha=0.88)
+                for i, v in enumerate(_outvals):
+                    ax.text(i, v + 1, f"{v:.0f}%", ha="center", fontsize=9)
+                ax.set_ylabel("% of loaned-out players", fontsize=9)
+                ax.set_ylim(0, 100)
+                ax.set_title(f"What actually happens after a loan-out (n={len(_loan_out)})", fontsize=9)
+                ax.grid(axis="y", alpha=0.15)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+            # ── Does the age at which you loan a player out matter? ──
+            st.markdown("**Does it matter how old the player is when you loan him out?**")
+            st.caption(
+                "Same loan-out events, split by the player's age at the time of the loan — value change, "
+                "how often he comes back to play, and eventual sale profit, by age bucket."
+            )
+            # _vchg and _sold both already carry age_bucket — it was on _loan_out before
+            # either was built, and inherited through each merge.
+            _vchg_age = _vchg
+            _sold_age = _sold
+            _ret_age = _loan_out.groupby("age_bucket", observed=True)["returned"].agg(pct_returned="mean", n="count")
+
+            _age_summary = pd.DataFrame({"age_bucket": _loan_labels}).set_index("age_bucket")
+            _age_summary["n_loans"] = _ret_age["n"]
+            _age_summary["pct_returned"] = _ret_age["pct_returned"] * 100
+            _age_summary["median_value_chg"] = _vchg_age.groupby("age_bucket", observed=True)["pct_change"].median()
+            _age_summary["avg_sale_profit"] = _sold_age.groupby("age_bucket", observed=True)["profit"].mean()
+            _age_summary["pct_sold"] = _sold_age.groupby("age_bucket", observed=True)["profit"].count() / _age_summary["n_loans"] * 100
+            _age_summary = _age_summary.dropna(subset=["n_loans"])
+            _age_summary = _age_summary[_age_summary["n_loans"] >= 15]
+
+            if len(_age_summary) >= 2:
+                c_la1, c_la2, c_la3 = st.columns(3)
+                with c_la1:
+                    _cols_la1 = ["#2ecc71" if v >= 0 else "#e74c3c" for v in _age_summary["median_value_chg"]]
+                    fig, ax = plt.subplots(figsize=(6, 5))
+                    bars = ax.bar(_age_summary.index.astype(str), _age_summary["median_value_chg"],
+                                  color=_cols_la1, edgecolor="white", alpha=0.88)
+                    ax.bar_label(bars, fmt="%+.0f%%", padding=2, fontsize=9)
+                    ax.axhline(0, color="black", lw=0.8, alpha=0.5)
+                    ax.set_xlabel("Age when loaned out", fontsize=9)
+                    ax.set_ylabel("Median % change in value", fontsize=9)
+                    ax.set_title("Value change after loan, by age", fontsize=9)
+                    ax.grid(axis="y", alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+                with c_la2:
+                    fig, ax = plt.subplots(figsize=(6, 5))
+                    bars = ax.bar(_age_summary.index.astype(str), _age_summary["pct_returned"],
+                                  color="#3498db", edgecolor="white", alpha=0.88)
+                    ax.bar_label(bars, fmt="%.0f%%", padding=2, fontsize=9)
+                    ax.set_xlabel("Age when loaned out", fontsize=9)
+                    ax.set_ylabel("% who return to play for the parent club", fontsize=9)
+                    ax.set_title("Do they ever come back, by age?", fontsize=9)
+                    ax.set_ylim(0, max(_age_summary["pct_returned"].max() * 1.3, 10))
+                    ax.grid(axis="y", alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+                with c_la3:
+                    _profit_by_age = _age_summary.dropna(subset=["avg_sale_profit"])
+                    if not _profit_by_age.empty:
+                        _cols_la3 = ["#2ecc71" if v >= 0 else "#e74c3c" for v in _profit_by_age["avg_sale_profit"]]
+                        fig, ax = plt.subplots(figsize=(6, 5))
+                        bars = ax.bar(_profit_by_age.index.astype(str), _profit_by_age["avg_sale_profit"],
+                                      color=_cols_la3, edgecolor="white", alpha=0.88)
+                        _pad_la3 = max(abs(_profit_by_age["avg_sale_profit"].max()),
+                                       abs(_profit_by_age["avg_sale_profit"].min()), 0.1) * 0.3
+                        ax.set_ylim(min(0, _profit_by_age["avg_sale_profit"].min()) - _pad_la3,
+                                    max(0, _profit_by_age["avg_sale_profit"].max()) + _pad_la3)
+                        for bar, row in zip(bars, _profit_by_age.itertuples()):
+                            ax.text(bar.get_x()+bar.get_width()/2,
+                                    row.avg_sale_profit + (_pad_la3*0.15 if row.avg_sale_profit >= 0 else -_pad_la3*0.15),
+                                    f"€{row.avg_sale_profit:+.1f}m\n({row.pct_sold:.0f}% sold)", ha="center",
+                                    va="bottom" if row.avg_sale_profit >= 0 else "top", fontsize=8)
+                        ax.axhline(0, color="black", lw=0.8, alpha=0.5)
+                        ax.set_xlabel("Age when loaned out", fontsize=9)
+                        ax.set_ylabel("Avg profit if eventually sold (€m)", fontsize=9)
+                        ax.set_title("The money: sale profit, by age", fontsize=9)
+                        ax.grid(axis="y", alpha=0.15)
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close()
+
