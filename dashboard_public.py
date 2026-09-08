@@ -2156,3 +2156,362 @@ with tab2:
                         st.pyplot(fig)
                         plt.close()
 
+        st.subheader("Group 4 — Squad Composition & Risk")
+        st.caption(
+            "How a squad's age profile relates to results, value, and stability."
+        )
+        st.divider()
+        st.markdown("#### Squad Age vs League Position")
+        st.caption(
+            "Each dot is one team-season. X-axis = minutes-weighted squad age; "
+            "Y-axis = final La Liga position (lower = better). "
+            "Is there a sweet spot? Do younger squads finish higher or lower? "
+            "The trend line answers it across all 8 seasons."
+        )
+
+        if not squad_data.empty and not overperf.empty:
+            # Minutes-weighted age per team-season
+            _ap_rows = []
+            for (tm_ap, s_ap), grp_ap in squad_data[
+                squad_data["minutes"].notna() &
+                squad_data["age"].notna() &
+                (squad_data["minutes"] > 0)
+            ].groupby(["team", "season"]):
+                wt_ap = float(np.average(grp_ap["age"], weights=grp_ap["minutes"]))
+                _ap_rows.append({"team": tm_ap, "season": s_ap, "wt_age": wt_ap})
+            _ap_df = pd.DataFrame(_ap_rows)
+
+            # Compute league position from pts within each season
+            _op  = overperf[["team", "season", "pts"]].copy()
+            _op["position"] = _op.groupby("season")["pts"].rank(
+                ascending=False, method="min"
+            ).astype(int)
+
+            _ap_merged = _ap_df.merge(_op, on=["team", "season"], how="inner")
+
+            if not _ap_merged.empty:
+                _is_sel = _ap_merged["team"] == selected_team
+                _other  = _ap_merged[~_is_sel]
+                _sel_ap = _ap_merged[_is_sel]
+
+                fig, ax = plt.subplots(figsize=(10, 6))
+
+                # All other team-seasons
+                sc = ax.scatter(_other["wt_age"], _other["position"],
+                                c="#3498db", alpha=0.45, s=50,
+                                edgecolors="white", linewidths=0.4, zorder=3,
+                                label="All team-seasons")
+
+                # Selected team highlighted
+                if not _sel_ap.empty:
+                    ax.scatter(_sel_ap["wt_age"], _sel_ap["position"],
+                               c="#e74c3c", alpha=0.9, s=90,
+                               edgecolors="white", linewidths=0.6,
+                               zorder=5, label=selected_team)
+                    for _, r_ap in _sel_ap.iterrows():
+                        ax.annotate(
+                            str(int(r_ap["season"])),
+                            (r_ap["wt_age"], r_ap["position"]),
+                            fontsize=7, xytext=(5, 3),
+                            textcoords="offset points", color="#c0392b",
+                        )
+
+                # Regression trend line
+                _sl_ap, _int_ap, _r_ap, _p_ap, _ = stats.linregress(
+                    _ap_merged["wt_age"], _ap_merged["position"]
+                )
+                _x_ap = np.linspace(_ap_merged["wt_age"].min(),
+                                    _ap_merged["wt_age"].max(), 100)
+                ax.plot(_x_ap, _sl_ap * _x_ap + _int_ap,
+                        color="#e67e22", lw=2, ls="--", alpha=0.85,
+                        label=f"Trend  r={_r_ap:.2f}  p={_p_ap:.3f}")
+
+                # Shade zones
+                ax.axhspan(0.5,  4.5, alpha=0.05, color="#2ecc71", zorder=0)
+                ax.axhspan(17.5, 20.5, alpha=0.05, color="#e74c3c", zorder=0)
+                ax.text(_ap_merged["wt_age"].max() + 0.05, 2.5,
+                        "Champions\nLeague zone", fontsize=7,
+                        color="#27ae60", alpha=0.7, va="center")
+                ax.text(_ap_merged["wt_age"].max() + 0.05, 19,
+                        "Relegation\nzone", fontsize=7,
+                        color="#c0392b", alpha=0.7, va="center")
+
+                ax.set_xlabel("Minutes-weighted squad age (years)", fontsize=10)
+                ax.set_ylabel("Final La Liga position (1 = champion)", fontsize=10)
+                ax.set_title(
+                    "Does squad age predict league position? (all La Liga team-seasons 2018–2025)",
+                    fontsize=11
+                )
+                ax.set_ylim(21, 0)   # invert: 1st at top
+                ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+                ax.legend(fontsize=8)
+                ax.grid(alpha=0.12)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+        # ══════════════════════════════════════════════════════════════
+        # MINUTE DISTRIBUTION PATTERNS  (ideas 1 · 2 · 3)
+        # ══════════════════════════════════════════════════════════════
+        st.divider()
+        st.markdown("#### Age Band vs Performance")
+        st.caption(
+            "Across all team-seasons: does giving more minutes to a particular age band "
+            "predict better results? Each dot = one team-season. "
+            "Trend line and r-value for each band separately."
+        )
+
+        if not squad_data.empty and not overperf.empty:
+            _abp_rows = []
+            for (tm_bp, s_bp), grp_bp in squad_data[
+                squad_data["minutes"].notna() & (squad_data["minutes"] > 0)
+            ].groupby(["team", "season"]):
+                tot_bp = grp_bp["minutes"].sum()
+                if tot_bp == 0:
+                    continue
+                _abp_rows.append({
+                    "team": tm_bp, "season": s_bp,
+                    "dev_pct":  grp_bp[grp_bp["age_band"] == "Development (≤23)"]["minutes"].sum() / tot_bp * 100,
+                    "peak_pct": grp_bp[grp_bp["age_band"] == "Peak (24–30)"]["minutes"].sum()     / tot_bp * 100,
+                    "vet_pct":  grp_bp[grp_bp["age_band"] == "Veteran (31+)"]["minutes"].sum()    / tot_bp * 100,
+                })
+            _abp_df = pd.DataFrame(_abp_rows)
+            _op_xg  = overperf[["team", "season", "xpts"]].copy()
+            _op_xg["xpts_pg"] = _op_xg["xpts"] / 38
+            _abp_m  = _abp_df.merge(_op_xg, on=["team", "season"], how="inner")
+
+            if not _abp_m.empty:
+                _is_s_abp  = _abp_m["team"] == selected_team
+                _bands_cfg = [
+                    ("dev_pct",  "Development (≤23)", "#2ecc71"),
+                    ("peak_pct", "Peak (24–30)",      "#3498db"),
+                    ("vet_pct",  "Veteran (31+)",     "#e67e22"),
+                ]
+                fig, axes = plt.subplots(1, 3, figsize=(14, 5), sharey=True)
+                for ax_b, (col_b, lbl_b, clr_b) in zip(axes, _bands_cfg):
+                    _x_b = _abp_m[col_b]
+                    _y_b = _abp_m["xpts_pg"]
+                    ax_b.scatter(_x_b[~_is_s_abp], _y_b[~_is_s_abp],
+                                 c=clr_b, alpha=0.45, s=45, edgecolors="white",
+                                 linewidths=0.4, zorder=3)
+                    if _is_s_abp.any():
+                        ax_b.scatter(_x_b[_is_s_abp], _y_b[_is_s_abp],
+                                     c="#c0392b", alpha=0.9, s=80, edgecolors="white",
+                                     linewidths=0.6, zorder=5, label=selected_team)
+                    if len(_x_b) >= 5:
+                        _sl_b, _int_b, _r_b, _p_b, _ = stats.linregress(_x_b, _y_b)
+                        _xr_b = np.linspace(_x_b.min(), _x_b.max(), 100)
+                        ax_b.plot(_xr_b, _sl_b * _xr_b + _int_b,
+                                  color="#2c3e50", lw=1.8, ls="--", alpha=0.7,
+                                  label=f"r={_r_b:.2f}  p={_p_b:.3f}")
+                    ax_b.legend(fontsize=7)
+                    ax_b.set_xlabel(f"% of minutes — {lbl_b}", fontsize=9)
+                    ax_b.set_title(lbl_b, fontsize=10, color=clr_b)
+                    ax_b.grid(alpha=0.12)
+                axes[0].set_ylabel("xPts / game", fontsize=9)
+                plt.suptitle(
+                    "Does the age mix of minutes predict performance? (all La Liga team-seasons)",
+                    fontsize=11, y=1.01
+                )
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+        # ── Value per 90 by age band ────────────────────────────────────
+        st.divider()
+        st.markdown("#### Squad Stability vs Performance")
+        st.caption(
+            "For each team-season: what % of players were also at the club the previous season? "
+            "Plotted against the team's xPts residual (how much they over/under-performed "
+            "their squad budget). Does stability help or hurt?"
+        )
+
+        if not squad_data.empty:
+            _ss7 = squad_data[["player_id", "team", "season"]].dropna()
+            _ret_rows = []
+            for (tm7, s7), grp7 in _ss7.groupby(["team", "season"]):
+                curr7 = set(grp7["player_id"])
+                prev7 = _ss7[(_ss7["team"] == tm7) & (_ss7["season"] == s7 - 1)]
+                if prev7.empty:
+                    continue
+                retention = len(curr7 & set(prev7["player_id"])) / len(curr7) * 100
+                _ret_rows.append({"team": tm7, "season": s7, "retention_pct": retention})
+
+            _ret_df = pd.DataFrame(_ret_rows)
+            _perf7  = overperf[["team", "season", "xpts", "predicted_xpts"]].copy()
+            _perf7["residual"] = _perf7["xpts"] - _perf7["predicted_xpts"]
+            _stab   = _ret_df.merge(_perf7, on=["team", "season"], how="inner")
+
+            if not _stab.empty:
+                _stab["_is_sel"] = _stab["team"] == selected_team
+                fig, ax = plt.subplots(figsize=(9, 6))
+
+                ax.scatter(
+                    _stab[~_stab["_is_sel"]]["retention_pct"],
+                    _stab[~_stab["_is_sel"]]["residual"],
+                    alpha=0.45, s=55, c="#3498db", edgecolors="white", zorder=3,
+                    label="Other teams"
+                )
+                sel7 = _stab[_stab["_is_sel"]]
+                if not sel7.empty:
+                    ax.scatter(
+                        sel7["retention_pct"], sel7["residual"],
+                        alpha=0.9, s=90, c="#e74c3c", edgecolors="white",
+                        zorder=5, label=selected_team
+                    )
+                    for _, r7 in sel7.iterrows():
+                        ax.annotate(
+                            str(int(r7["season"])),
+                            (r7["retention_pct"], r7["residual"]),
+                            fontsize=7, xytext=(5, 3), textcoords="offset points"
+                        )
+
+                # Trend line
+                _sl, _int, _r, _p, _ = stats.linregress(
+                    _stab["retention_pct"], _stab["residual"]
+                )
+                _xr = np.linspace(_stab["retention_pct"].min(),
+                                  _stab["retention_pct"].max(), 100)
+                ax.plot(_xr, _sl * _xr + _int, color="#e67e22",
+                        lw=1.8, ls="--", alpha=0.8,
+                        label=f"Trend  r={_r:.2f}  p={_p:.3f}")
+
+                ax.axhline(0, color="black", lw=0.8, alpha=0.4)
+                ax.set_xlabel("Player retention rate (% from previous season)", fontsize=10)
+                ax.set_ylabel("xPts above / below budget expectation", fontsize=9)
+                ax.set_title(
+                    "Squad stability vs performance (all La Liga team-seasons 2019–2025)",
+                    fontsize=11
+                )
+                ax.legend(fontsize=8)
+                ax.grid(alpha=0.13)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+        # ── Total unique players used (8 seasons) ───────────────────────
+        st.divider()
+        st.markdown("#### Average Squad Tenure")
+        st.caption(
+            "For each team-season, the average number of seasons (including this one) each "
+            "squad member has spent at the club so far."
+        )
+        _ten = squad_data[["player_id", "team", "season"]].drop_duplicates().sort_values(["player_id", "team", "season"])
+        _ten["tenure"] = _ten.groupby(["player_id", "team"]).cumcount() + 1
+        _ten_agg = _ten.groupby(["team", "season"])["tenure"].mean().reset_index(name="avg_tenure")
+
+        _ten_s  = _ten_agg[_ten_agg["season"] == selected_season].sort_values("avg_tenure", ascending=False)
+        _ten_tm = _ten_agg[_ten_agg["team"] == selected_team].sort_values("season")
+
+        c_ten1, c_ten2 = st.columns(2)
+        with c_ten1:
+            if not _ten_s.empty:
+                _cols_ten = ["#e74c3c" if t == selected_team else "#3498db" for t in _ten_s["team"]]
+                fig, ax = plt.subplots(figsize=(6, max(4, len(_ten_s) * 0.32)))
+                ax.barh(_ten_s["team"][::-1], _ten_s["avg_tenure"][::-1],
+                        color=_cols_ten[::-1], edgecolor="white", alpha=0.88)
+                ax.set_xlabel("Avg seasons at club (current squad)", fontsize=9)
+                ax.set_title(f"Squad tenure — {selected_season}/{str(selected_season+1)[-2:]}", fontsize=10)
+                ax.tick_params(axis="y", labelsize=7)
+                ax.grid(axis="x", alpha=0.15)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+        with c_ten2:
+            if len(_ten_tm) >= 2:
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.plot(_ten_tm["season"], _ten_tm["avg_tenure"], marker="o", color="#8e44ad", lw=2.2)
+                ax.fill_between(_ten_tm["season"], _ten_tm["avg_tenure"], alpha=0.12, color="#8e44ad")
+                ax.set_xlabel("Season"); ax.set_ylabel("Avg seasons at club", fontsize=9)
+                ax.set_title(f"{selected_team} — squad tenure trend", fontsize=10)
+                ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+                ax.grid(alpha=0.15)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+            else:
+                st.caption("Need at least 2 seasons of data to show the trend.")
+
+        # ── Continuity at the top ─────────────────────────────────────
+        st.divider()
+        st.markdown("#### Continuity at the Top — building a squad that stays good")
+        st.caption(
+            "It's one thing to perform well this season — it's another to have a squad that can keep "
+            "doing it. This tests age composition against **future** performance and **season-to-season "
+            "consistency**, not just the current year."
+        )
+
+        if not squad_data.empty:
+            _cnt_mins = squad_data[squad_data["minutes"].notna() & (squad_data["minutes"] > 0)].copy()
+            _cnt_rows = []
+            for (tm_c, s_c), grp_c in _cnt_mins.groupby(["team", "season"]):
+                tot_c = grp_c["minutes"].sum()
+                if tot_c == 0:
+                    continue
+                _cnt_rows.append({
+                    "team": tm_c, "season": s_c,
+                    "dev_pct":  grp_c[grp_c["age_band"] == "Development (≤23)"]["minutes"].sum() / tot_c * 100,
+                    "peak_pct": grp_c[grp_c["age_band"] == "Peak (24–30)"]["minutes"].sum()     / tot_c * 100,
+                    "vet_pct":  grp_c[grp_c["age_band"] == "Veteran (31+)"]["minutes"].sum()    / tot_c * 100,
+                })
+            _cnt_mix = pd.DataFrame(_cnt_rows).merge(
+                overperf[["team", "season", "manager_skill_xpts", "squad_value_m"]], on=["team", "season"]
+            )
+
+            _cnt_team = _cnt_mix.groupby("team").agg(
+                n_seasons=("season", "count"),
+                avg_dev=("dev_pct", "mean"), avg_peak=("peak_pct", "mean"), avg_vet=("vet_pct", "mean"),
+                avg_skill=("manager_skill_xpts", "mean"), std_skill=("manager_skill_xpts", "std"),
+                avg_value=("squad_value_m", "mean"),
+            ).reset_index()
+            _cnt_team = _cnt_team[_cnt_team["n_seasons"] >= 4].dropna(subset=["std_skill"])
+
+            if len(_cnt_team) >= 10:
+                _r_vet, _p_vet = stats.pearsonr(_cnt_team["avg_vet"], _cnt_team["std_skill"])
+                _r_dev, _p_dev = stats.pearsonr(_cnt_team["avg_dev"], _cnt_team["std_skill"])
+                _flag_teams = ("Granada", "Real Sociedad", "Valencia", "Barcelona", "Real Madrid")
+
+                c_ct_v, c_ct_d = st.columns(2)
+                with c_ct_v:
+                    fig, ax = plt.subplots(figsize=(6, 5.5))
+                    ax.scatter(_cnt_team["avg_vet"], _cnt_team["std_skill"], color="#2980b9",
+                               alpha=0.75, s=60, edgecolors="white")
+                    _sl_v, _in_v = np.polyfit(_cnt_team["avg_vet"], _cnt_team["std_skill"], 1)
+                    _xr_v = np.linspace(_cnt_team["avg_vet"].min(), _cnt_team["avg_vet"].max(), 50)
+                    ax.plot(_xr_v, _sl_v * _xr_v + _in_v, color="grey", lw=1.5, ls="--", alpha=0.7)
+                    for _, r_ct in _cnt_team.iterrows():
+                        if r_ct["team"] in _flag_teams:
+                            ax.annotate(r_ct["team"], (r_ct["avg_vet"], r_ct["std_skill"]),
+                                        fontsize=7, xytext=(4, 3), textcoords="offset points", alpha=0.8)
+                    ax.set_xlabel("Avg veteran (31+) minutes %, across all tracked seasons", fontsize=9)
+                    ax.set_ylabel("Std dev of skill across seasons (lower = more consistent)", fontsize=9)
+                    ax.set_title(
+                        f"Veteran reliance vs. consistency\n(r={_r_vet:.2f}, p={_p_vet:.3f}, n={len(_cnt_team)})",
+                        fontsize=9.5
+                    )
+                    ax.grid(alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+                with c_ct_d:
+                    fig, ax = plt.subplots(figsize=(6, 5.5))
+                    ax.scatter(_cnt_team["avg_dev"], _cnt_team["std_skill"], color="#e67e22",
+                               alpha=0.75, s=60, edgecolors="white", marker="^")
+                    _sl_d, _in_d = np.polyfit(_cnt_team["avg_dev"], _cnt_team["std_skill"], 1)
+                    _xr_d = np.linspace(_cnt_team["avg_dev"].min(), _cnt_team["avg_dev"].max(), 50)
+                    ax.plot(_xr_d, _sl_d * _xr_d + _in_d, color="grey", lw=1.5, ls="--", alpha=0.7)
+                    for _, r_ct in _cnt_team.iterrows():
+                        if r_ct["team"] in _flag_teams:
+                            ax.annotate(r_ct["team"], (r_ct["avg_dev"], r_ct["std_skill"]),
+                                        fontsize=7, xytext=(4, 3), textcoords="offset points", alpha=0.8)
+                    ax.set_xlabel("Avg development (≤23) minutes %, across all tracked seasons", fontsize=9)
+                    ax.set_ylabel("Std dev of skill across seasons (lower = more consistent)", fontsize=9)
+                    ax.set_title(
+                        f"Development reliance vs. consistency\n(r={_r_dev:.2f}, p={_p_dev:.3f}, n={len(_cnt_team)})",
+                        fontsize=9.5
+                    )
+                    ax.grid(alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
