@@ -366,6 +366,20 @@ def build_pre_season_accuracy(_overperf):
 
 
 @st.cache_data
+def load_organic_growth():
+    try:
+        og = pd.read_csv("organic_growth.csv")
+        og["team"] = og["team"].replace({
+            "CD Leganés":            "Leganes",
+            "RCD Espanyol Barcelona": "Espanyol",
+            "Real Valladolid CF":    "Real Valladolid",
+        })
+        return og
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["team", "season", "growth"])
+
+
+@st.cache_data
 def load_squad_data():
     """Join squad_stats (age, minutes) with player_values (market value)."""
     try:
@@ -521,6 +535,7 @@ value_xpts_model = fit_value_xpts_model(overperf)
 overperf["predicted_xpts"]     = _predicted_xpts(*value_xpts_model, overperf["squad_value_m"])
 overperf["manager_skill_xpts"] = overperf["xpts"] - overperf["predicted_xpts"]
 mgr_stints   = build_manager_stints(tm, managers, overperf, value_xpts_model)
+organic_growth = load_organic_growth()
 wages        = load_wages()
 pred_corrs   = build_predictive_correlations(overperf, wages)
 justice_table = build_justice_table(overperf)
@@ -643,7 +658,7 @@ st.divider()
 # NOTE: this is a deliberately trimmed public build — Article 1, plus Groups
 # 1-2 of Article 2 (Groups 3-4 unlock here as their articles publish); see
 # dashboard.py in the private dev repo for the full version.
-tab1, tab2 = st.tabs(["Article 1 — Framework", "Article 2 — Clubs"])
+tab1, tab2, tab3 = st.tabs(["Article 1 — Framework", "Article 2 — Clubs", "Article 3 — Managers"])
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -2514,4 +2529,256 @@ with tab2:
                     plt.tight_layout()
                     st.pyplot(fig)
                     plt.close()
+
+with tab3:
+    st.subheader("Article 3 — The Managers: Who's Actually Good at Their Job")
+    st.caption(
+        "Career rankings weighted by games managed, and career patterns across clubs, tenure, "
+        "experience, and crisis appointments."
+    )
+    st.divider()
+    st.divider()
+    st.subheader("Group 1 — Rankings & Career Overview")
+    st.caption(
+        "Who's actually good at their job: the games-weighted skill leaderboard, individual career breakdowns, how much they grow player value, and whether the sackings match what the numbers said."
+    )
+    st.markdown("#### Manager Rankings — who's beating their budget, and who isn't")
+    m_coef, b_coef = value_xpts_model
+    st.markdown(
+        "Same **Manager Skill** idea as the other tabs (see sidebar): how many xPts a manager's "
+        "team produced above or below what's typical for a squad of that market value, with one "
+        "extra fix here — **per-stint isolation**. If a manager took over mid-season, only *their "
+        "own* games count towards their number. So if a team was struggling before they arrived, "
+        "that bad run doesn't get unfairly pinned on the new manager (and a hot start under a "
+        "previous manager doesn't get credited to whoever replaced them)."
+    )
+    with st.expander("Technical detail: how the trend line is fit"):
+        st.markdown(
+            f"Fit across all 160 team-seasons since 2018/19: `xPts ≈ {m_coef:.2f} × ln(squad value €m) {b_coef:+.1f}`. "
+            "A log curve (rather than a straight line) fits the data better, because the gap between "
+            "€50m and €150m squads matters a lot more for results than the same €100m gap between "
+            "€800m and €900m squads — money has diminishing returns at the very top."
+        )
+    st.caption("By default this shows only the season selected in the sidebar — tick the box below to pool all 8 seasons instead.")
+
+    if mgr_stints.empty:
+        st.warning("No manager stint data available.")
+    else:
+        combine_seasons = st.checkbox(
+            "Combine all 8 seasons together (instead of just the season selected in the sidebar)",
+            value=True,
+        )
+
+        if combine_seasons:
+            scope_df = mgr_stints
+            scope_label = "2018/19 – 2025/26 (all seasons combined)"
+            default_min_games, slider_max = 19, 76
+        else:
+            scope_df = mgr_stints[mgr_stints.season == selected_season]
+            scope_label = f"{selected_season}/{str(selected_season+1)[-2:]} only"
+            default_min_games, slider_max = 10, 38
+
+        st.caption(f"Scope: **{scope_label}**")
+
+        min_games = st.slider(
+            "Minimum total games managed (filters out tiny sample sizes)",
+            min_value=5, max_value=slider_max, value=min(default_min_games, slider_max), step=1,
+            help="Managers with fewer total games than this (within the scope above) are excluded from the leaderboard."
+        )
+
+        if scope_df.empty:
+            st.info(f"No manager-stint data for {scope_label}.")
+            agg_f = pd.DataFrame()
+        else:
+            agg = scope_df.groupby("manager").apply(lambda g: pd.Series({
+                "stints":            len(g),
+                "total_games":       g["games"].sum(),
+                "teams":             ", ".join(sorted(set(g["team"]))),
+                "avg_squad_value_m": np.average(g["squad_value_m"], weights=g["games"]),
+                "skill_avg":         np.average(g["stint_skill"], weights=g["games"]),
+            })).reset_index()
+
+            agg_f = agg[agg["total_games"] >= min_games].copy()
+            agg_f["total_games"] = agg_f["total_games"].astype(int)
+            agg_f["stints"]      = agg_f["stints"].astype(int)
+
+        if agg_f.empty:
+            st.info("No managers meet that games threshold — lower the slider.")
+        else:
+            top_n = min(12, len(agg_f))
+            best = agg_f.sort_values("skill_avg", ascending=False).head(top_n)
+            worst = agg_f.sort_values("skill_avg", ascending=True).head(top_n)
+
+            col_best, col_worst = st.columns(2)
+
+            with col_best:
+                st.markdown("**Best (xPts above value-predicted trend)**")
+                fig, ax = plt.subplots(figsize=(6, 6))
+                y = np.arange(len(best))
+                ax.barh(y, best["skill_avg"], color="#2ecc71", edgecolor="white", alpha=0.88)
+                labels = [f"{_short_name(m, 20)} ({t.split(',')[0].strip()})"
+                          for m, t in zip(best["manager"], best["teams"])]
+                ax.set_yticks(y)
+                ax.set_yticklabels(labels, fontsize=8)
+                ax.invert_yaxis()
+                ax.axvline(0, color="black", linewidth=1)
+                ax.set_xlabel("xPts vs. value-predicted trend (+ = overperforming)", fontsize=9)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+            with col_worst:
+                st.markdown("**Worst (xPts below value-predicted trend)**")
+                fig, ax = plt.subplots(figsize=(6, 6))
+                y = np.arange(len(worst))
+                ax.barh(y, worst["skill_avg"], color="#e74c3c", edgecolor="white", alpha=0.88)
+                labels = [f"{_short_name(m, 20)} ({t.split(',')[0].strip()})"
+                          for m, t in zip(worst["manager"], worst["teams"])]
+                ax.set_yticks(y)
+                ax.set_yticklabels(labels, fontsize=8)
+                ax.invert_yaxis()
+                ax.axvline(0, color="black", linewidth=1)
+                ax.set_xlabel("xPts vs. value-predicted trend (- = underperforming)", fontsize=9)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+            st.divider()
+            st.markdown("##### Inspect one manager's stints")
+            st.caption(
+                "Pick a manager to see every spell broken down. Each bar is one stint at one club — "
+                "green means they outperformed what their squad value predicted, red means they fell short."
+            )
+            chosen_mgr = st.selectbox("Manager", sorted(mgr_stints["manager"].unique()))
+            detail = mgr_stints[mgr_stints.manager == chosen_mgr].sort_values(["season","team"]).copy()
+
+            if not detail.empty:
+                detail["label"] = detail.apply(
+                    lambda r: f"{r['team']}\n{r['season']}/{str(r['season']+1)[-2:]} ({int(r['games'])}g)", axis=1
+                )
+                bar_colors = ["#2ecc71" if s >= 0 else "#e74c3c" for s in detail["stint_skill"]]
+
+                fig_d, ax_d = plt.subplots(figsize=(max(7, len(detail) * 1.2), 5))
+                bars_d = ax_d.bar(range(len(detail)), detail["stint_skill"],
+                                  color=bar_colors, edgecolor="white", alpha=0.88, width=0.6)
+                for bar, val in zip(bars_d, detail["stint_skill"]):
+                    ax_d.text(bar.get_x() + bar.get_width() / 2,
+                              val + (0.3 if val >= 0 else -0.6),
+                              f"{val:+.1f}", ha="center", va="bottom" if val >= 0 else "top",
+                              fontsize=8, fontweight="bold")
+                ax_d.set_xticks(range(len(detail)))
+                ax_d.set_xticklabels(detail["label"], fontsize=8)
+                ax_d.axhline(0, color="black", lw=1.2)
+                ax_d.set_ylabel("Stint skill (xPts above / below budget prediction)", fontsize=9)
+                ax_d.set_title(f"{chosen_mgr} — stint-by-stint skill", fontsize=11)
+                ax_d.grid(axis="y", alpha=0.2)
+                plt.tight_layout()
+                st.pyplot(fig_d)
+                plt.close()
+
+            # ── organic squad value growth ──────────────────────────────────
+            st.divider()
+            st.markdown("##### Organic Squad Value Growth")
+            st.caption(
+                "Players who stayed at the same club year-over-year: how much did their "
+                "combined Transfermarkt market value increase? This is **organic growth** — "
+                "squad appreciation that can't be explained by transfer spending, and is the "
+                "best available proxy for a manager's impact on player development. When "
+                "multiple managers shared a season, growth is split by games managed."
+            )
+
+            if not organic_growth.empty:
+                # attribute organic growth to managers by game share within each team-season
+                _og_j = mgr_stints.groupby(["team", "season", "manager"])["games"].sum().reset_index()
+                _og_tot = _og_j.groupby(["team", "season"])["games"].sum().reset_index(name="_tot")
+                _og_j = _og_j.merge(_og_tot, on=["team", "season"])
+                _og_j["share"] = _og_j["games"] / _og_j["_tot"]
+                _og_j = _og_j.merge(organic_growth, on=["team", "season"], how="inner")
+                _og_j["attributed_m"] = _og_j["growth"] * _og_j["share"]
+
+                if not combine_seasons:
+                    _og_scope = _og_j[_og_j.season == selected_season].copy()
+                else:
+                    _og_scope = _og_j.copy()
+
+                _og_agg = (
+                    _og_scope.groupby("manager")
+                    .apply(lambda g: pd.Series({
+                        "total_growth_m": g["attributed_m"].sum(),
+                        "n_seasons":      g["season"].nunique(),
+                        "total_games":    g["games"].sum(),
+                    }))
+                    .reset_index()
+                )
+                _og_agg = _og_agg[_og_agg["total_games"] >= min_games].copy()
+                _og_agg["avg_growth_per_season"] = _og_agg["total_growth_m"] / _og_agg["n_seasons"]
+
+                if _og_agg.empty:
+                    st.info("Not enough data with current games filter — lower the slider.")
+                else:
+                    top_n_og = min(12, len(_og_agg))
+                    best_og  = _og_agg.sort_values("avg_growth_per_season", ascending=False).head(top_n_og)
+                    worst_og = _og_agg.sort_values("avg_growth_per_season", ascending=True).head(top_n_og)
+
+                    col_bo, col_wo = st.columns(2)
+                    with col_bo:
+                        st.markdown("**Best (most organic squad growth, per season)**")
+                        fig, ax = plt.subplots(figsize=(6, 6))
+                        y = np.arange(len(best_og))
+                        ax.barh(y, best_og["avg_growth_per_season"], color="#8e44ad", edgecolor="white", alpha=0.88)
+                        ax.set_yticks(y)
+                        ax.set_yticklabels([_short_name(m, 20) for m in best_og["manager"]], fontsize=8)
+                        ax.invert_yaxis()
+                        ax.axvline(0, color="black", lw=1)
+                        ax.set_xlabel("Avg attributed organic growth per season (€m)", fontsize=9)
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close()
+
+                    with col_wo:
+                        st.markdown("**Worst (least organic squad growth, per season)**")
+                        fig, ax = plt.subplots(figsize=(6, 6))
+                        y = np.arange(len(worst_og))
+                        ax.barh(y, worst_og["avg_growth_per_season"], color="#e67e22", edgecolor="white", alpha=0.88)
+                        ax.set_yticks(y)
+                        ax.set_yticklabels([_short_name(m, 20) for m in worst_og["manager"]], fontsize=8)
+                        ax.invert_yaxis()
+                        ax.axvline(0, color="black", lw=1)
+                        ax.set_xlabel("Avg attributed organic growth per season (€m)", fontsize=9)
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close()
+
+                    # per-stint breakdown for the selected manager
+                    _og_mgr_detail = _og_j[_og_j.manager == chosen_mgr].sort_values(["season", "team"]).copy()
+                    if not _og_mgr_detail.empty:
+                        st.markdown(f"**{chosen_mgr} — organic value created per stint**")
+                        _og_mgr_detail["label"] = _og_mgr_detail.apply(
+                            lambda r: f"{r['team']}\n{r['season']}/{str(r['season']+1)[-2:]}", axis=1
+                        )
+                        _og_colors = ["#8e44ad" if v >= 0 else "#e67e22" for v in _og_mgr_detail["attributed_m"]]
+                        fig_og, ax_og = plt.subplots(figsize=(max(6, len(_og_mgr_detail) * 1.2), 4))
+                        bars_og = ax_og.bar(
+                            range(len(_og_mgr_detail)), _og_mgr_detail["attributed_m"],
+                            color=_og_colors, edgecolor="white", alpha=0.88, width=0.6
+                        )
+                        for bar, val in zip(bars_og, _og_mgr_detail["attributed_m"]):
+                            ax_og.text(
+                                bar.get_x() + bar.get_width() / 2,
+                                val + (0.5 if val >= 0 else -1.0),
+                                f"€{val:+.1f}m", ha="center",
+                                va="bottom" if val >= 0 else "top",
+                                fontsize=8, fontweight="bold"
+                            )
+                        ax_og.set_xticks(range(len(_og_mgr_detail)))
+                        ax_og.set_xticklabels(_og_mgr_detail["label"], fontsize=8)
+                        ax_og.axhline(0, color="black", lw=1.2)
+                        ax_og.set_ylabel("Organic squad growth attributed (€m)", fontsize=9)
+                        ax_og.set_title(f"{chosen_mgr} — organic value creation by stint", fontsize=10)
+                        ax_og.grid(axis="y", alpha=0.2)
+                        plt.tight_layout()
+                        st.pyplot(fig_og)
+                        plt.close()
+            else:
+                st.info("Organic growth data not available — run `collect_player_values.py` first.")
 
