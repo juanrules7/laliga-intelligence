@@ -300,6 +300,37 @@ def build_manager_stints(_tm, _mgr, _overperf, _value_model, min_games=5):
 
 
 @st.cache_data
+def build_career_analysis(_mgr_stints):
+    multi_rows, lc_rows, lt_rows = [], [], []
+    for mgr, g in _mgr_stints.groupby("manager"):
+        clubs = g["team"].unique()
+        if len(clubs) >= 2:
+            for _, r in g.iterrows():
+                multi_rows.append({"manager": mgr, "club": r["team"],
+                                   "skill": r["stint_skill"], "games": r["games"]})
+        # Season number = which season of this manager's OVERALL La Liga career this is
+        # (cumulative across every club they've managed, not "which club is this").
+        season_order = sorted(g["season"].unique())
+        season_rank  = {s: i + 1 for i, s in enumerate(season_order)}
+        for _, r in g.iterrows():
+            lc_rows.append({"manager": mgr, "team": r["team"],
+                            "la_liga_season_num": season_rank[r["season"]],
+                            "skill": r["stint_skill"]})
+        for team, tg in g.groupby("team"):
+            if tg["season"].nunique() >= 3:
+                early = tg[tg["season"].rank(method="first") <= 2]
+                late  = tg[tg["season"].rank(method="first") > 2]
+                if not early.empty and not late.empty:
+                    s1 = np.average(early["stint_skill"], weights=early["games"])
+                    s2 = np.average(late["stint_skill"],  weights=late["games"])
+                    lt_rows.append({"manager": mgr, "team": team,
+                                    "early_skill": s1, "late_skill": s2,
+                                    "improvement": s2 - s1,
+                                    "total_seasons": tg["season"].nunique()})
+    return pd.DataFrame(multi_rows), pd.DataFrame(lc_rows), pd.DataFrame(lt_rows)
+
+
+@st.cache_data
 def load_wages():
     try:
         return pd.read_csv("wages_capology.csv")
@@ -535,6 +566,7 @@ value_xpts_model = fit_value_xpts_model(overperf)
 overperf["predicted_xpts"]     = _predicted_xpts(*value_xpts_model, overperf["squad_value_m"])
 overperf["manager_skill_xpts"] = overperf["xpts"] - overperf["predicted_xpts"]
 mgr_stints   = build_manager_stints(tm, managers, overperf, value_xpts_model)
+multi_df, lc_df, lt_df = build_career_analysis(mgr_stints)
 organic_growth = load_organic_growth()
 wages        = load_wages()
 pred_corrs   = build_predictive_correlations(overperf, wages)
@@ -2782,3 +2814,335 @@ with tab3:
             else:
                 st.info("Organic growth data not available — run `collect_player_values.py` first.")
 
+    st.subheader("Group 2 — Career Trajectory & Portability")
+    st.caption(
+        "Does a manager's skill travel with them — across seasons at the same club, across different clubs, and across a growing career in La Liga?"
+    )
+    st.divider()
+    st.markdown("#### Two-season trajectory — do managers improve in year 2?")
+    st.caption("For every manager who had 2+ seasons at the same club, compare skill in season 1 vs. season 2.")
+    if not mgr_stints.empty:
+        traj_rows = []
+        for (mgr, team), g in mgr_stints.groupby(["manager","team"]):
+            seasons_sorted = sorted(g["season"].unique())
+            if len(seasons_sorted) < 2: continue
+            s1g = g[g.season == seasons_sorted[0]]
+            s2g = g[g.season == seasons_sorted[1]]
+            traj_rows.append({
+                "manager": mgr, "team": team,
+                "season1": seasons_sorted[0], "season2": seasons_sorted[1],
+                "skill_s1": np.average(s1g["stint_skill"], weights=s1g["games"]),
+                "skill_s2": np.average(s2g["stint_skill"], weights=s2g["games"]),
+                "improvement": np.average(s2g["stint_skill"], weights=s2g["games"]) -
+                               np.average(s1g["stint_skill"], weights=s1g["games"]),
+            })
+        traj_df = pd.DataFrame(traj_rows)
+        if not traj_df.empty:
+            traj_sorted = traj_df.sort_values("improvement", ascending=False)
+            fig_tr2, ax_tr2 = plt.subplots(figsize=(10, min(14, max(5, len(traj_sorted)*0.22))))
+            labels_tr2  = [f"{r['manager']} @ {r['team']}" for _, r in traj_sorted.iterrows()]
+            colors_tr2  = ["#2ecc71" if v > 0 else "#e74c3c" for v in traj_sorted["improvement"]]
+            ax_tr2.barh(labels_tr2[::-1], traj_sorted["improvement"][::-1],
+                        color=colors_tr2[::-1], edgecolor="white", alpha=0.88)
+            ax_tr2.axvline(0, color="grey", linewidth=0.8, linestyle="--")
+            ax_tr2.set_xlabel("Skill change season 2 − season 1 (xPts)", fontsize=9)
+            ax_tr2.set_title("Two-season trajectory — who improved and who declined?", fontsize=10)
+            ax_tr2.tick_params(axis="y", labelsize=7)
+            plt.tight_layout()
+            st.pyplot(fig_tr2)
+            plt.close()
+
+    # ── Multi-club consistency ────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Multi-club consistency — does skill transfer between clubs?")
+    st.caption("Managers who worked at 2+ La Liga clubs. Error bars show variation across clubs — narrow = consistent, wide = context-dependent.")
+    if not multi_df.empty:
+        mgr_var = (
+            multi_df.groupby("manager")
+            .agg(skill_mean=("skill","mean"), skill_std=("skill","std"), n_clubs=("club","count"))
+            .reset_index().dropna(subset=["skill_std"]).sort_values("skill_std")
+        )
+        fig_mc, ax_mc = plt.subplots(figsize=(10, min(14, max(4, len(mgr_var)*0.25))))
+        y_mc = np.arange(len(mgr_var))
+        ax_mc.barh(y_mc, mgr_var["skill_mean"],
+                   xerr=mgr_var["skill_std"],
+                   color=["#2ecc71" if v>=0 else "#e74c3c" for v in mgr_var["skill_mean"]],
+                   edgecolor="white", alpha=0.88, capsize=4)
+        ax_mc.set_yticks(y_mc)
+        ax_mc.set_yticklabels(mgr_var["manager"], fontsize=8)
+        ax_mc.axvline(0, color="grey", linewidth=0.8, linestyle="--")
+        ax_mc.set_xlabel("Mean skill ± std dev across clubs (xPts)", fontsize=9)
+        ax_mc.set_title("Multi-club consistency — narrow error bars = skill is portable", fontsize=10)
+        plt.tight_layout()
+        st.pyplot(fig_mc)
+        plt.close()
+
+    # ── La Liga learning curve ────────────────────────────────────────
+    st.divider()
+    st.markdown("#### La Liga learning curve — do managers improve with experience in the league?")
+    st.caption(
+        "Season number counts cumulatively across a manager's **whole La Liga career** — every club "
+        "they've managed, in order — not which club they're currently at. A manager who's stayed at "
+        "one club for 5 seasons shows up at season 5, not stuck at season 1."
+    )
+    if not lc_df.empty:
+        lc_agg = (
+            lc_df.groupby("la_liga_season_num")
+            .agg(avg_skill=("skill","mean"), n=("skill","count"), std=("skill","std"))
+            .reset_index()
+        )
+        lc_agg = lc_agg[lc_agg.n >= 3]
+        if not lc_agg.empty:
+            fig_lc, ax_lc = plt.subplots(figsize=(9, 4))
+            ax_lc.plot(lc_agg["la_liga_season_num"], lc_agg["avg_skill"],
+                       marker="o", linewidth=2.5, color="#3498db")
+            ax_lc.fill_between(lc_agg["la_liga_season_num"],
+                                lc_agg["avg_skill"] - lc_agg["std"]/2,
+                                lc_agg["avg_skill"] + lc_agg["std"]/2,
+                                alpha=0.12, color="#3498db")
+            ax_lc.axhline(0, color="grey", linewidth=0.8, linestyle="--")
+            for _, row in lc_agg.iterrows():
+                ax_lc.annotate(f"n={int(row['n'])}", (row["la_liga_season_num"], row["avg_skill"]),
+                               xytext=(0, 8), textcoords="offset points", fontsize=8, ha="center")
+            ax_lc.set_xlabel("Season number in La Liga (1 = first season)", fontsize=9)
+            ax_lc.set_ylabel("Avg manager skill (xPts)", fontsize=9)
+            ax_lc.set_title("Does experience in La Liga improve a manager's numbers?", fontsize=10)
+            ax_lc.set_xticks(lc_agg["la_liga_season_num"])
+            plt.tight_layout()
+            st.pyplot(fig_lc)
+            plt.close()
+
+    # ── Long-tenure mastery ───────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Long-tenure mastery — do managers peak after 3+ years at the same club?")
+    st.caption("Skill in seasons 1–2 vs. season 3+ for managers who stayed long enough. Positive = mastery. Negative = staleness.")
+    if not lt_df.empty:
+        lt_sorted = lt_df.sort_values("improvement", ascending=False)
+        labels_lt  = [f"{r['manager']} @ {r['team']} ({int(r['total_seasons'])}y)" for _, r in lt_sorted.iterrows()]
+        colors_lt  = ["#2ecc71" if v > 0 else "#e74c3c" for v in lt_sorted["improvement"]]
+        fig_lt, ax_lt = plt.subplots(figsize=(10, min(12, max(4, len(lt_sorted)*0.28))))
+        y_lt = np.arange(len(lt_sorted))
+        ax_lt.barh(y_lt, lt_sorted["improvement"], color=colors_lt, edgecolor="white", alpha=0.88)
+        ax_lt.set_yticks(y_lt)
+        ax_lt.set_yticklabels(labels_lt, fontsize=8)
+        ax_lt.axvline(0, color="grey", linewidth=0.8, linestyle="--")
+        ax_lt.set_xlabel("Skill improvement: seasons 3+ vs. seasons 1–2 (xPts)", fontsize=9)
+        ax_lt.set_title("Long-tenure mastery — who improves with time and who declines?", fontsize=10)
+        plt.tight_layout()
+        st.pyplot(fig_lt)
+        plt.close()
+
+    # ── Overperformance sustainability ──────────────────────────────────
+    st.divider()
+    st.markdown("#### Overperformance sustainability — can an elite season be sustained?")
+    st.caption("Every manager-season with skill above +8: did they replicate that at the same club the following season?")
+    if not mgr_stints.empty:
+        high = mgr_stints[mgr_stints.stint_skill > 8][["manager","team","season","stint_skill"]].copy()
+        if not high.empty:
+            sus_rows = []
+            for _, row in high.iterrows():
+                nxt = mgr_stints[(mgr_stints.manager==row.manager) & (mgr_stints.team==row.team) & (mgr_stints.season==row.season+1)]
+                sus_rows.append({
+                    "manager": row.manager, "team": row.team,
+                    "peak_season": f"{row.season}/{str(row.season+1)[-2:]}",
+                    "peak_skill":  row.stint_skill,
+                    "next_skill":  nxt["stint_skill"].values[0] if not nxt.empty else None,
+                })
+            sus_df = pd.DataFrame(sus_rows)
+            n_with = sus_df.dropna(subset=["next_skill"])
+            if not n_with.empty:
+                sus_colors = ["#2ecc71" if v > 5 else "#e74c3c" for v in n_with["next_skill"]]
+                fig_sus, ax_sus = plt.subplots(figsize=(7, 6))
+                ax_sus.scatter(n_with["peak_skill"], n_with["next_skill"],
+                               c=sus_colors, alpha=0.8, s=70, edgecolors="white", linewidths=0.6, zorder=4)
+                _lim_sus = max(n_with["peak_skill"].max(), n_with["next_skill"].max(), 8) * 1.1
+                ax_sus.plot([0, _lim_sus], [0, _lim_sus], color="grey", lw=1, ls="--",
+                            alpha=0.5, label="Same skill next season", zorder=2)
+                ax_sus.axhline(5, color="#2ecc71", lw=0.8, ls=":", alpha=0.5)
+                for _, r in n_with.iterrows():
+                    ax_sus.annotate(f"{_short_name(r['manager'],13)} ({r['team']})",
+                                     (r["peak_skill"], r["next_skill"]),
+                                     fontsize=6.5, xytext=(5,3), textcoords="offset points", alpha=0.85)
+                ax_sus.set_xlabel("Peak-season skill (xPts vs budget)", fontsize=9)
+                ax_sus.set_ylabel("Next-season skill at same club", fontsize=9)
+                ax_sus.set_title("Does an elite season (+8 or higher) repeat?", fontsize=10)
+                ax_sus.legend(fontsize=8)
+                ax_sus.grid(alpha=0.15)
+                plt.tight_layout()
+                st.pyplot(fig_sus)
+                plt.close()
+
+    # ── Firefighter managers ──────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Firefighter managers — mid-season crisis appointments")
+    st.caption(
+        "A genuine rescue job: appointed October–February, **and** the club was actually sitting "
+        "in the bottom half of the table (based on results up to that exact date) when they took "
+        "over. Only that specific crisis stint counts — not a manager's other, non-crisis jobs. "
+        "For firefighters who kept the club up, we also check how they did the **following season**."
+    )
+    if not mgr_stints.empty and not managers.empty and not tm.empty:
+        _crisis_rows = []
+        for _, mr in managers.iterrows():
+            d_from = mr["date_from"]
+            if pd.isna(d_from) or d_from.month not in [10, 11, 12, 1, 2]:
+                continue
+            team_c = mr["team"]
+            _later = tm[(tm.team == team_c) & (tm.date >= d_from)]
+            if _later.empty:
+                continue
+            season_c = _later["season"].min()
+
+            _prior = tm[(tm.season == season_c) & (tm.date < d_from)]
+            if _prior.empty:
+                continue
+            _stand = _prior.groupby("team").agg(pts=("pts", "sum"), gf=("goals_for", "sum"), ga=("goals_against", "sum")).reset_index()
+            _stand["gd"] = _stand["gf"] - _stand["ga"]
+            _stand = _stand.sort_values(["pts", "gd"], ascending=False).reset_index(drop=True)
+            _stand.index = range(1, len(_stand) + 1)
+            if team_c not in _stand["team"].values:
+                continue
+            _pos = _stand[_stand["team"] == team_c].index[0]
+            if _pos <= len(_stand) / 2:
+                continue  # not actually bottom-half at the time — skip
+
+            _d_to = mr["date_to"]
+            _spell = _later if pd.isna(_d_to) else _later[_later.date <= _d_to]
+            _crisis_rows.append({
+                "manager": mr["manager"], "team": team_c, "season": season_c,
+                "position_at_hire": _pos, "date_from": d_from,
+                "crisis_games": int((_spell["season"] == season_c).sum())
+            })
+        _crisis_df = pd.DataFrame(_crisis_rows).drop_duplicates(subset=["manager", "team", "season"])
+
+        if not _crisis_df.empty:
+            # A manager can have two separate spells in one season (e.g. sacked, then re-hired);
+            # keep only the stint that matches the crisis spell, so the earlier spell isn't
+            # mislabelled as a rescue job.
+            fire_stints = _crisis_df.merge(mgr_stints, on=["manager", "team", "season"], how="inner")
+            fire_stints["_gdiff"] = (fire_stints["games"] - fire_stints["crisis_games"]).abs()
+            fire_stints = (
+                fire_stints.sort_values("_gdiff")
+                .drop_duplicates(subset=["manager", "team", "season"])
+                .drop(columns="_gdiff")
+                .reset_index(drop=True)
+            )
+            _ms_keys = pd.MultiIndex.from_frame(mgr_stints[["manager", "team", "season", "games"]])
+            _fire_keys = pd.MultiIndex.from_frame(fire_stints[["manager", "team", "season", "games"]])
+            norm_stints = mgr_stints[~_ms_keys.isin(_fire_keys)]
+
+            if not fire_stints.empty:
+                top_fire = fire_stints.sort_values("stint_skill", ascending=False)
+                st.markdown("**Every genuine firefighter stint, by skill score:**")
+                fire_labels = [
+                    f"{_short_name(m,15)} ({t} {s}/{str(s+1)[-2:]}, pos {p} at hire)"
+                    for m, t, s, p in zip(top_fire["manager"], top_fire["team"], top_fire["season"], top_fire["position_at_hire"])
+                ]
+                fire_colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in top_fire["stint_skill"]]
+                fig_fire, ax_fire = plt.subplots(figsize=(8, min(10, max(4, len(top_fire)*0.25))))
+                ax_fire.barh(fire_labels[::-1], top_fire["stint_skill"][::-1],
+                             color=fire_colors[::-1], edgecolor="white", alpha=0.88)
+                ax_fire.axvline(0, color="black", lw=0.8, alpha=0.5)
+                ax_fire.set_xlabel("Stint skill (xPts vs budget)", fontsize=9)
+                ax_fire.tick_params(axis="y", labelsize=7.5)
+                ax_fire.grid(axis="x", alpha=0.15)
+                plt.tight_layout()
+                st.pyplot(fig_fire)
+                plt.close()
+
+                # ── vs. the manager they replaced ──
+                st.markdown("**Did they actually improve on the manager they replaced?**")
+                st.caption(
+                    "The firefighter's stint skill vs. the outgoing manager's stint skill in that "
+                    "same season — did results actually get better once the change was made, "
+                    "independent of budget expectations either way?"
+                )
+                _pred_rows = []
+                for _, fr in fire_stints.iterrows():
+                    team_c, season_c, d_from = fr["team"], fr["season"], fr["date_from"]
+                    _outgoing = managers[
+                        (managers.team == team_c) &
+                        (managers.date_to.notna()) &
+                        (managers.date_to < d_from)
+                    ].sort_values("date_to")
+                    if _outgoing.empty:
+                        continue
+                    prev_mgr = _outgoing.iloc[-1]["manager"]
+                    _prev_stint = mgr_stints[
+                        (mgr_stints.manager == prev_mgr) &
+                        (mgr_stints.team == team_c) &
+                        (mgr_stints.season == season_c)
+                    ]
+                    if _prev_stint.empty:
+                        continue
+                    prev_skill = np.average(_prev_stint["stint_skill"], weights=_prev_stint["games"])
+                    _pred_rows.append({
+                        "firefighter": fr["manager"], "predecessor": prev_mgr, "team": team_c, "season": season_c,
+                        "firefighter_skill": fr["stint_skill"], "predecessor_skill": prev_skill,
+                        "improvement": fr["stint_skill"] - prev_skill,
+                    })
+                _pred_df = pd.DataFrame(_pred_rows)
+                if not _pred_df.empty:
+                    _pred_sorted = _pred_df.sort_values("improvement", ascending=False)
+                    _pred_labels = [
+                        f"{_short_name(r['firefighter'],13)} vs {_short_name(r['predecessor'],13)} ({r['team']})"
+                        for _, r in _pred_sorted.iterrows()
+                    ]
+                    _pred_colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in _pred_sorted["improvement"]]
+                    fig_pred, ax_pred = plt.subplots(figsize=(8, min(10, max(3, len(_pred_sorted)*0.25))))
+                    ax_pred.barh(_pred_labels[::-1], _pred_sorted["improvement"][::-1],
+                                 color=_pred_colors[::-1], edgecolor="white", alpha=0.88)
+                    ax_pred.axvline(0, color="black", lw=0.8, alpha=0.5)
+                    ax_pred.set_xlabel("Skill change: firefighter minus predecessor (xPts)", fontsize=9)
+                    ax_pred.tick_params(axis="y", labelsize=7.5)
+                    ax_pred.grid(axis="x", alpha=0.15)
+                    plt.tight_layout()
+                    st.pyplot(fig_pred)
+                    plt.close()
+                else:
+                    st.info("Not enough data to compare firefighters against their predecessors yet.")
+
+                # ── the following season, for those who survived ──
+                st.markdown("**Survived relegation — how did they do the following season?**")
+                _followup_rows = []
+                for _, fr in fire_stints.iterrows():
+                    _stand_full = get_standings(fr["season"])
+                    if fr["team"] not in _stand_full["team"].values:
+                        continue
+                    _zone = _stand_full.loc[_stand_full["team"] == fr["team"], "zone"].iloc[0]
+                    survived = _zone != "Relegated"
+                    _next = mgr_stints[
+                        (mgr_stints.manager == fr["manager"]) &
+                        (mgr_stints.team == fr["team"]) &
+                        (mgr_stints.season == fr["season"] + 1)
+                    ]
+                    _followup_rows.append({
+                        "manager": fr["manager"], "team": fr["team"], "season": fr["season"],
+                        "crisis_skill": fr["stint_skill"], "survived": survived,
+                        "still_in_charge_next": not _next.empty,
+                        "next_skill": np.average(_next["stint_skill"], weights=_next["games"]) if not _next.empty else None,
+                    })
+                _fu_df = pd.DataFrame(_followup_rows)
+                _survivors = _fu_df[_fu_df["survived"]]
+                _kept_on = _survivors[_survivors["still_in_charge_next"]]
+
+                if not _survivors.empty:
+                    if not _kept_on.empty:
+                        _fu_labels = [f"{_short_name(m,15)} ({t})" for m, t in zip(_kept_on["manager"], _kept_on["team"])]
+                        fig_fu, ax_fu = plt.subplots(figsize=(8, min(8, max(3, len(_kept_on)*0.3))))
+                        y_fu = np.arange(len(_kept_on))
+                        ax_fu.barh(y_fu - 0.18, _kept_on["crisis_skill"], height=0.32, color="#e67e22", label="Crisis season")
+                        ax_fu.barh(y_fu + 0.18, _kept_on["next_skill"], height=0.32, color="#2980b9", label="Following season")
+                        ax_fu.set_yticks(y_fu)
+                        ax_fu.set_yticklabels(_fu_labels, fontsize=8)
+                        ax_fu.axvline(0, color="black", lw=0.8, alpha=0.5)
+                        ax_fu.set_xlabel("Stint skill (xPts vs budget)", fontsize=9)
+                        ax_fu.legend(fontsize=8)
+                        ax_fu.grid(axis="x", alpha=0.15)
+                        plt.tight_layout()
+                        st.pyplot(fig_fu)
+                        plt.close()
+                else:
+                    st.info("No genuine firefighter stints resulted in survival with enough follow-up data yet.")
+        else:
+            st.info("No appointments met the genuine crisis criteria (Oct-Feb hire, bottom-half at the time).")
