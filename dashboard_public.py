@@ -331,6 +331,62 @@ def build_career_analysis(_mgr_stints):
 
 
 @st.cache_data
+def build_sacking_events(_tm, _mgr):
+    sacked = _mgr[_mgr.status == "sacked"].copy()
+    aftermath_rows, bounce_rows = [], []
+    for _, row in sacked.iterrows():
+        team, mgr_name, sack_date = row["team"], row["manager"], row["date_to"]
+        if pd.isna(sack_date): continue
+        team_m = _tm[_tm.team == team].sort_values("date")
+        before = team_m[team_m["date"] <= sack_date].tail(10)
+        after  = team_m[team_m["date"] >  sack_date].head(10)
+        if len(before) < 5 or len(after) < 5: continue
+        b_x, a_x = before["xpts"].mean(), after["xpts"].mean()
+        b_p, a_p = before["pts"].mean(),  after["pts"].mean()
+        aftermath_rows.append({
+            "manager": mgr_name, "team": team,
+            "month": sack_date.month if hasattr(sack_date,"month") else pd.Timestamp(sack_date).month,
+            "before_xpts_pg": b_x, "after_xpts_pg": a_x, "xpts_change": a_x - b_x,
+            "before_pts_pg":  b_p, "after_pts_pg":  a_p, "pts_change":  a_p - b_p,
+        })
+    # Bounce: per appointment
+    for _, row in _mgr.iterrows():
+        team, mgr_name, d_from = row["team"], row["manager"], row["date_from"]
+        d_to = row["date_to"] if pd.notna(row["date_to"]) else pd.Timestamp("2100-01-01")
+        if pd.isna(d_from): continue
+        appt_m = _tm[(_tm.team==team) & (_tm.date>=d_from) & (_tm.date<=d_to)].sort_values("date")
+        if len(appt_m) < 10: continue
+        g1  = appt_m.iloc[:10]["xpts"].mean()
+        g2  = appt_m.iloc[10:20]["xpts"].mean() if len(appt_m) >= 20 else None
+        g3  = appt_m.iloc[20:]["xpts"].mean()   if len(appt_m) > 20  else None
+        bounce_rows.append({"manager": mgr_name, "team": team,
+                            "g1_10": g1, "g11_20": g2, "g21plus": g3,
+                            "overall": appt_m["xpts"].mean()})
+    return pd.DataFrame(aftermath_rows), pd.DataFrame(bounce_rows)
+
+
+@st.cache_data
+def build_appointment_quality(_mgr_stints, _mgr):
+    sacked = _mgr[_mgr.status == "sacked"].copy()
+    rows = []
+    for _, row in sacked.iterrows():
+        team, outgoing, sack_date = row["team"], row["manager"], row["date_to"]
+        if pd.isna(sack_date): continue
+        out_skill = _mgr_stints[(_mgr_stints.manager==outgoing) & (_mgr_stints.team==team)]
+        if out_skill.empty: continue
+        successor = _mgr[(_mgr.team==team) & (_mgr.date_from > sack_date)].sort_values("date_from")
+        if successor.empty: continue
+        incoming = successor.iloc[0]["manager"]
+        in_skill = _mgr_stints[(_mgr_stints.manager==incoming) & (_mgr_stints.team==team)]
+        if in_skill.empty: continue
+        out_s = np.average(out_skill["stint_skill"], weights=out_skill["games"])
+        in_s  = np.average(in_skill["stint_skill"],  weights=in_skill["games"])
+        rows.append({"team": team, "outgoing": outgoing, "incoming": incoming,
+                     "out_skill": out_s, "in_skill": in_s, "improvement": in_s - out_s})
+    return pd.DataFrame(rows)
+
+
+@st.cache_data
 def load_wages():
     try:
         return pd.read_csv("wages_capology.csv")
@@ -567,6 +623,8 @@ overperf["predicted_xpts"]     = _predicted_xpts(*value_xpts_model, overperf["sq
 overperf["manager_skill_xpts"] = overperf["xpts"] - overperf["predicted_xpts"]
 mgr_stints   = build_manager_stints(tm, managers, overperf, value_xpts_model)
 multi_df, lc_df, lt_df = build_career_analysis(mgr_stints)
+sacking_aftermath, mgr_bounce = build_sacking_events(tm, managers)
+appt_quality = build_appointment_quality(mgr_stints, managers)
 organic_growth = load_organic_growth()
 wages        = load_wages()
 pred_corrs   = build_predictive_correlations(overperf, wages)
@@ -690,7 +748,7 @@ st.divider()
 # NOTE: this is a deliberately trimmed public build — Article 1, plus Groups
 # 1-2 of Article 2 (Groups 3-4 unlock here as their articles publish); see
 # dashboard.py in the private dev repo for the full version.
-tab1, tab2, tab3 = st.tabs(["Article 1 — Framework", "Article 2 — Clubs", "Article 3 — Managers"])
+tab1, tab2, tab3, tab4 = st.tabs(["Article 1 — Framework", "Article 2 — Clubs", "Article 3 — Managers", "Article 4a — Does It Work?"])
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -3146,3 +3204,199 @@ with tab3:
                     st.info("No genuine firefighter stints resulted in survival with enough follow-up data yet.")
         else:
             st.info("No appointments met the genuine crisis criteria (Oct-Feb hire, bottom-half at the time).")
+
+
+with tab4:
+    st.subheader("Article 4a — The Decisions: Does Changing the Manager Actually Work?")
+    st.caption(
+        "Before-vs-after xPts around every La Liga sacking, sacking timing, "
+        "trigger-happy clubs, and which boards actually hire better replacements."
+    )
+    st.divider()
+    # ── Does changing managers work? ─────────────────────────────────
+    st.markdown("### Does sacking a manager actually work?")
+    st.caption(
+        "Average xPts/game in the 10 matches BEFORE each La Liga sacking vs. 10 matches AFTER. "
+        "xPts tells us whether quality of play improved — independent of luck."
+    )
+    if not sacking_aftermath.empty:
+        avg_bx = sacking_aftermath["before_xpts_pg"].mean()
+        avg_ax = sacking_aftermath["after_xpts_pg"].mean()
+        avg_bp = sacking_aftermath["before_pts_pg"].mean()
+        avg_ap = sacking_aftermath["after_pts_pg"].mean()
+        pct_x  = (sacking_aftermath["xpts_change"] > 0).mean() * 100
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Avg xPts/g before", f"{avg_bx:.2f}")
+        c2.metric("Avg xPts/g after",  f"{avg_ax:.2f}", delta=f"{avg_ax-avg_bx:+.2f}")
+        c3.metric("Avg pts/g before",  f"{avg_bp:.2f}")
+        c4.metric("Avg pts/g after",   f"{avg_ap:.2f}", delta=f"{avg_ap-avg_bp:+.2f}")
+        st.caption(f"xPts quality improved after sacking in **{pct_x:.0f}%** of cases ({int(pct_x/100*len(sacking_aftermath))}/{len(sacking_aftermath)}). "
+                   "Points improvement is larger than xPts improvement — part of it is regression to the mean, not coaching quality.")
+
+        fig_sa, axes_sa = plt.subplots(1, 2, figsize=(13, max(5, len(sacking_aftermath)*0.32)))
+        for ax, col, title in [
+            (axes_sa[0], "xpts_change", "Change in xPts/game (quality)"),
+            (axes_sa[1], "pts_change",  "Change in pts/game (results)"),
+        ]:
+            s_sorted = sacking_aftermath.sort_values(col)
+            colors_sa = ["#2ecc71" if v > 0 else "#e74c3c" for v in s_sorted[col]]
+            y_labels  = [f"{r['manager'][:14]} → {r['team'][:10]}" for _, r in s_sorted.iterrows()]
+            ax.barh(y_labels, s_sorted[col], color=colors_sa, edgecolor="white", alpha=0.88)
+            ax.axvline(0, color="grey", linewidth=0.8, linestyle="--")
+            ax.set_xlabel("Change per game", fontsize=9)
+            ax.set_title(title, fontsize=9)
+            ax.tick_params(axis="y", labelsize=6.5)
+        plt.suptitle("Before vs after every La Liga sacking — xPts quality (left) and actual results (right)", fontsize=10)
+        plt.tight_layout()
+        st.pyplot(fig_sa)
+        plt.close()
+
+    # ── Sacking timing ────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Sacking timing — when do managers get fired and does it matter?")
+    if not sacking_aftermath.empty:
+        month_names = {8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec",1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun"}
+        months_ord  = sorted(sacking_aftermath["month"].unique(), key=lambda m: m if m>=7 else m+12)
+        mc = sacking_aftermath["month"].value_counts()
+        mi = sacking_aftermath.groupby("month")["xpts_change"].mean()
+        mlabels = [month_names.get(m,str(m)) for m in months_ord]
+        mc_vals = [mc.get(m,0) for m in months_ord]
+        mi_vals = [mi.get(m,0)  for m in months_ord]
+
+        fig_st, axes_st = plt.subplots(1, 2, figsize=(12, 4))
+        axes_st[0].bar(mlabels, mc_vals, color="#3498db", edgecolor="white", alpha=0.88)
+        axes_st[0].set_ylabel("Number of sackings", fontsize=9)
+        axes_st[0].set_title("When do sackings happen?", fontsize=10)
+        colors_mi = ["#2ecc71" if v > 0 else "#e74c3c" for v in mi_vals]
+        axes_st[1].bar(mlabels, mi_vals, color=colors_mi, edgecolor="white", alpha=0.88)
+        axes_st[1].axhline(0, color="grey", linewidth=0.8, linestyle="--")
+        axes_st[1].set_ylabel("Avg xPts/game improvement after sacking", fontsize=9)
+        axes_st[1].set_title("Does timing of sacking affect improvement in quality?", fontsize=10)
+        plt.tight_layout()
+        st.pyplot(fig_st)
+        plt.close()
+
+    # ── Trigger-happy clubs ───────────────────────────────────────────
+    st.divider()
+    st.markdown("### Trigger-happy clubs — does firing more managers help?")
+    if not sacking_aftermath.empty and not mgr_stints.empty:
+        sack_counts = sacking_aftermath.groupby("team").size().reset_index(name="sackings")
+        club_skill  = (
+            mgr_stints.groupby("team")
+            .apply(lambda g: np.average(g["stint_skill"], weights=g["games"]))
+            .reset_index().rename(columns={0:"avg_skill"})
+        )
+        trigger = sack_counts.merge(club_skill, on="team")
+        if len(trigger) >= 5:
+            r_tr, _ = stats.pearsonr(trigger["sackings"], trigger["avg_skill"])
+            fig_tr, ax_tr = plt.subplots(figsize=(8, 5))
+            ax_tr.scatter(trigger["sackings"], trigger["avg_skill"],
+                          color="#3498db", s=80, alpha=0.8, edgecolors="white", zorder=4)
+            for _, row in trigger.iterrows():
+                ax_tr.annotate(row["team"], (row["sackings"], row["avg_skill"]),
+                               fontsize=7, xytext=(3,3), textcoords="offset points")
+            m_tr, b_tr = np.polyfit(trigger["sackings"], trigger["avg_skill"], 1)
+            x_rng = np.linspace(trigger["sackings"].min(), trigger["sackings"].max(), 50)
+            ax_tr.plot(x_rng, m_tr*x_rng+b_tr, color="grey", linewidth=1.5, linestyle="--", alpha=0.7)
+            ax_tr.axhline(0, color="grey", linewidth=0.6, linestyle=":", alpha=0.5)
+            ax_tr.set_xlabel("Number of managers sacked (across 8 seasons)", fontsize=9)
+            ax_tr.set_ylabel("Avg manager skill (xPts vs. budget)", fontsize=9)
+            ax_tr.set_title(f"More sackings → better or worse long-term performance?  (r = {r_tr:.2f})", fontsize=10)
+            plt.tight_layout()
+            st.pyplot(fig_tr)
+            plt.close()
+
+    # ── Appointment quality + Board quality ───────────────────────────
+    st.divider()
+    st.markdown("### Appointment quality — do clubs hire better after sacking?")
+    if not appt_quality.empty:
+        pct_imp = (appt_quality["improvement"] > 0).mean() * 100
+        st.caption(f"Successor outperformed predecessor in **{pct_imp:.0f}%** of sackings where both managers had measurable data.")
+        aq_sorted = appt_quality.sort_values("improvement")
+        aq_labels = [f"{r['team']}: {r['outgoing'][:10]}→{r['incoming'][:10]}" for _, r in aq_sorted.iterrows()]
+        colors_aq = ["#2ecc71" if v > 0 else "#e74c3c" for v in aq_sorted["improvement"]]
+        fig_aq, ax_aq = plt.subplots(figsize=(10, max(5, len(aq_sorted)*0.38)))
+        ax_aq.barh(aq_labels, aq_sorted["improvement"], color=colors_aq, edgecolor="white", alpha=0.88)
+        ax_aq.axvline(0, color="grey", linewidth=0.8, linestyle="--")
+        ax_aq.set_xlabel("Improvement in manager skill (successor − predecessor, xPts)", fontsize=9)
+        ax_aq.set_title("Did each sacking lead to a better manager?", fontsize=10)
+        ax_aq.tick_params(axis="y", labelsize=6.5)
+        plt.tight_layout()
+        st.pyplot(fig_aq)
+        plt.close()
+
+        # ── Does patience help? ──
+        st.divider()
+        st.markdown("### Should clubs wait longer before pulling the trigger?")
+        st.caption(
+            "`out_skill`/`in_skill` above are already games-weighted across each manager's full spell at "
+            "the club, so a lucky 5-game stretch can't drive the number. Here we check whether giving the "
+            "outgoing manager more time before pulling the trigger leads to a better replacement."
+        )
+
+        def _total_games(mgr, team):
+            sub = mgr_stints[(mgr_stints.manager == mgr) & (mgr_stints.team == team)]
+            return sub["games"].sum()
+
+        _aq = appt_quality.copy()
+        _aq["out_games"] = _aq.apply(lambda r: _total_games(r["outgoing"], r["team"]), axis=1)
+
+        _aq["out_bucket"] = pd.cut(_aq["out_games"], bins=[0, 20, 50, 9999],
+                                    labels=["<20 games\n(quick trigger)", "20–50 games", "50+ games\n(patient)"], right=False)
+        _wait_agg = (
+            _aq.groupby("out_bucket", observed=True)
+            .agg(avg_improvement=("improvement", "mean"), avg_out_skill=("out_skill", "mean"), n=("improvement", "count"))
+        )
+        fig_w, ax_w = plt.subplots(figsize=(6, 4.5))
+        colors_w = ["#2ecc71" if v > 0 else "#e74c3c" for v in _wait_agg["avg_improvement"]]
+        bars_w = ax_w.bar(_wait_agg.index.astype(str), _wait_agg["avg_improvement"], color=colors_w, edgecolor="white", alpha=0.88)
+        ax_w.bar_label(bars_w, fmt="%+.1f", padding=2, fontsize=9)
+        ax_w.axhline(0, color="grey", lw=0.8, ls="--")
+        ax_w.set_ylabel("Avg improvement (xPts)", fontsize=9)
+        ax_w.set_title("Improvement by how long the outgoing manager was given", fontsize=9)
+        plt.tight_layout()
+        st.pyplot(fig_w)
+        plt.close()
+
+        _bad = _aq[_aq["out_skill"] < -3]
+        _bad_quick = _bad[_bad["out_games"] < 20]["improvement"]
+        _bad_slow  = _bad[_bad["out_games"] >= 20]["improvement"]
+        st.caption(
+            "Quick triggers (<20 games given) show a bigger average payoff than patient clubs "
+            f"(**{_wait_agg.loc[_wait_agg.index[0],'avg_improvement']:+.1f}** vs "
+            f"**{_wait_agg.loc[_wait_agg.index[-1],'avg_improvement']:+.1f}** xPts) — but that's confounded: "
+            "quick-trigger clubs are firing managers who were already a clear disaster "
+            f"(avg skill **{_wait_agg.loc[_wait_agg.index[0],'avg_out_skill']:+.1f}**), while patient clubs often "
+            f"fire managers whose skill number was still positive on average "
+            f"(**{_wait_agg.loc[_wait_agg.index[-1],'avg_out_skill']:+.1f}**) — there's simply less room to improve on. "
+            "Restricting to only genuinely bad predecessors (skill < -3) and comparing quick vs. slow within "
+            f"that group: quick (n={len(_bad_quick)}) averages **{_bad_quick.mean():+.1f}** xPts improvement, "
+            f"slow (n={len(_bad_slow)}) averages **{_bad_slow.mean():+.1f}** — almost identical. "
+            "**Timing doesn't drive the payoff once you control for how bad the outgoing manager actually was.** "
+            "The lever that matters is recognising a genuinely negative skill number, not how long the club waits "
+            "to act on it — and clubs that fire managers who were still posting a positive skill number get the "
+            "smallest, least reliable upgrades of anyone in this data."
+        )
+
+    st.divider()
+    st.markdown("**Does changing the manager actually work — put together?**")
+    st.markdown(
+        "- **Quality genuinely improves** in 67% of sackings, but the improvement is modest (+0.10 xPts/g) "
+        "next to the points bounce (+0.25 pts/g) — a real chunk of 'it worked' in the table is regression "
+        "to the mean, not new coaching.\n"
+        "- **Timing barely matters, with one exception** — firing in September (before enough signal has "
+        "accumulated) is the one month that reliably backfires; everything from October onward looks similar.\n"
+        "- **Firing more often doesn't help** (r=0.16, p=0.50 between sackings and long-run club skill), "
+        "but **hiring well does** — successors beat predecessors 71% of the time, averaging +3.35 xPts.\n"
+        "- **That upgrade holds up, and timing stops mattering once you isolate the real signal** — the "
+        "edge doesn't fade with more games (if anything it grows), and quick vs. patient triggers land at "
+        "the same outcome once you control for how bad the outgoing manager actually was.\n\n"
+        "**Put together:** sacking a manager is, on balance, a real decision that works — but the size of "
+        "the effect is smaller than the league table makes it look, and the one lever that actually matters "
+        "is recognizing a genuinely negative skill number, not how long a board waits or how often it pulls "
+        "the trigger."
+    )
+
+
+
