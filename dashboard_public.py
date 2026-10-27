@@ -2,12 +2,32 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import matplotlib.ticker as mticker
 plt.rcParams["figure.dpi"] = 72
 from scipy import stats
 from xgboost import XGBRegressor
 
 st.set_page_config(page_title="La Liga Intelligence", layout="wide")
+
+COLORS = {
+    "ALARM":      "#e74c3c",
+    "WATCH":      "#f39c12",
+    "RECOVERING": "#3498db",
+    "STABLE":     "#2ecc71",
+}
+
+def _mgr_gw(tl_df, date):
+    """Return GW number closest to a date, or None."""
+    try:
+        ts = pd.Timestamp(date)
+    except Exception:
+        return None
+    if tl_df.empty or pd.isna(ts):
+        return None
+    diff = (tl_df["date"] - ts).abs()
+    return int(tl_df.loc[diff.idxmin(), "gw"])
+
 
 def _short_name(name, limit=16):
     """Shorten a manager name without cutting a word in half: use the surname
@@ -748,7 +768,7 @@ st.divider()
 # NOTE: this is a deliberately trimmed public build — Article 1, plus Groups
 # 1-2 of Article 2 (Groups 3-4 unlock here as their articles publish); see
 # dashboard.py in the private dev repo for the full version.
-tab1, tab2, tab3, tab4 = st.tabs(["Article 1 — Framework", "Article 2 — Clubs", "Article 3 — Managers", "Article 4a — Does It Work?"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Article 1 — Framework", "Article 2 — Clubs", "Article 3 — Managers", "Article 4a — Does It Work?", "Article 4b — When to Act"])
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -3358,3 +3378,378 @@ with tab4:
         plt.tight_layout()
         st.pyplot(fig_w)
         plt.close()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TAB 5 — when to act (Article 4b)
+# ════════════════════════════════════════════════════════════════════════
+with tab5:
+    st.subheader("Article 4b — The Decisions: When Should You Pull the Trigger?")
+    st.caption(
+        "The ALARM/WATCH/RECOVERING/STABLE monitoring system and how many games before a skill score "
+        "is reliable."
+    )
+    st.divider()
+    st.subheader("Season timeline — predicted pressure index")
+    st.caption(
+        "The blue line shows how many points this team is predicted to earn over their next 5 games, "
+        "recalculated after every match. The coloured background is the verdict at a glance: "
+        "STABLE (no concerns), RECOVERING (was bad, now improving), WATCH (below budget expectation), "
+        "ALARM (sustained poor underlying quality — not just one bad result). "
+        "The purple dashed line is the squad value expectation — the benchmark everything is measured against."
+    )
+
+    fig, ax1 = plt.subplots(figsize=(16, 5))
+    gw    = tl["gw"].values
+    pred  = tl["pred"].values
+    pred_xpts_val = _safe(sv_season, "predicted_xpts")
+
+    for j in range(len(gw)):
+        ax1.axvspan(gw[j] - 0.5, gw[j] + 0.5,
+                    alpha=0.18, color=COLORS[tl.iloc[j]["verdict"]], linewidth=0)
+
+    ax1.plot(gw, pred, color="steelblue", linewidth=2.5, zorder=4)
+    ax1.scatter(gw, pred, c=[COLORS[v] for v in tl["verdict"]],
+                s=55, zorder=5, edgecolors="white", linewidths=0.6)
+    budget_line_per5 = (pred_xpts_val / 38 * 5) if pred_xpts_val else None
+    if budget_line_per5:
+        ax1.axhline(budget_line_per5, color="#8e44ad", linestyle="--", linewidth=1.5, alpha=0.85,
+                    label=f"Squad value expectation ({budget_line_per5:.1f} pts/5 games)")
+
+    ax1.set_xlim(gw[0] - 0.8, gw[-1] + 0.8)
+    ax1.set_ylim(0, 15)
+    ax1.set_xlabel("Gameweek", fontsize=10)
+    ax1.set_ylabel("Predicted points over next 5 games", fontsize=10)
+    patches = [mpatches.Patch(color=c, alpha=0.7, label=l) for l, c in COLORS.items()]
+    extra_lines = [
+        plt.Line2D([0],[0], color="steelblue", lw=2.5, label="Predicted pts (next 5)"),
+    ]
+    if budget_line_per5:
+        extra_lines.append(
+            plt.Line2D([0],[0], color="#8e44ad", lw=1.5, ls="--",
+                       label=f"Squad value expectation ({budget_line_per5:.1f} pts/5 games)")
+        )
+    ax1.legend(handles=patches + extra_lines, fontsize=9, loc="upper right", ncol=2)
+
+    # ── transfer window shading ───────────────────────────────────────
+    _shade_transfer_windows(ax1, tl, selected_season)
+
+    # ── manager event markers ─────────────────────────────────────────
+    if len(managers) > 0 and not tl.empty:
+        team_mgrs   = managers[managers.team == selected_team].sort_values("date_from")
+        all_dates   = tm[(tm.team == selected_team) & (tm.season == selected_season)]["date"]
+        season_start = all_dates.min()
+        season_end   = all_dates.max()
+
+        def _draw_mgr_markers(ax_target, y_top=14.8):
+            # Who was manager at kick-off of the season?
+            starter = team_mgrs[team_mgrs.date_from <= season_start]
+            if len(starter) > 0:
+                ax_target.text(
+                    gw[0], y_top,
+                    f"  ▌ {_short_name(starter.iloc[-1]['manager'], 20)}",
+                    fontsize=7, color="#2c3e50", va="top",
+                    fontweight="bold", zorder=7,
+                )
+
+            # Collect departures/appointments first, then merge events that
+            # land on (almost) the same GW so outgoing+incoming text doesn't overlap
+            departures, appointments = [], []
+            for _, mr in team_mgrs.iterrows():
+                if pd.notna(mr["date_from"]) and season_start < mr["date_from"] <= season_end:
+                    gw_app = _mgr_gw(tl, mr["date_from"])
+                    if gw_app and gw[0] <= gw_app <= gw[-1]:
+                        appointments.append((gw_app, str(mr["manager"])))
+                if pd.notna(mr["date_to"]) and season_start <= mr["date_to"] <= season_end:
+                    gw_dep = _mgr_gw(tl, mr["date_to"])
+                    if gw_dep and gw[0] <= gw_dep <= gw[-1]:
+                        dep_col = ("#e74c3c"
+                                   if str(mr.get("status", "")) == "sacked"
+                                   else "#e67e22")
+                        departures.append((gw_dep, str(mr["manager"]), dep_col))
+
+            used_dep, used_app = set(), set()
+            for di, (gw_dep, dep_name, dep_col) in enumerate(departures):
+                for ai, (gw_app, app_name) in enumerate(appointments):
+                    if ai in used_app:
+                        continue
+                    if abs(gw_app - gw_dep) <= 1:
+                        ax_target.axvline(gw_dep, color=dep_col, lw=1.8,
+                                          ls="--", alpha=0.85, zorder=6)
+                        ax_target.text(
+                            gw_dep + 0.2, y_top,
+                            f"✕ {_short_name(dep_name, 13)} → ▶ {_short_name(app_name, 13)}",
+                            fontsize=6.2, color=dep_col, va="top",
+                            rotation=90, zorder=7,
+                        )
+                        used_dep.add(di)
+                        used_app.add(ai)
+                        break
+
+            for di, (gw_dep, dep_name, dep_col) in enumerate(departures):
+                if di in used_dep:
+                    continue
+                ax_target.axvline(gw_dep, color=dep_col, lw=1.8,
+                                  ls="--", alpha=0.85, zorder=6)
+                ax_target.text(
+                    gw_dep + 0.2, y_top,
+                    f"✕ {_short_name(dep_name)}",
+                    fontsize=6.5, color=dep_col, va="top",
+                    rotation=90, zorder=7,
+                )
+
+            for ai, (gw_app, app_name) in enumerate(appointments):
+                if ai in used_app:
+                    continue
+                ax_target.axvline(gw_app, color="#27ae60", lw=1.8,
+                                  ls="--", alpha=0.85, zorder=6)
+                ax_target.text(
+                    gw_app + 0.2, y_top,
+                    f"▶ {_short_name(app_name)}",
+                    fontsize=6.5, color="#27ae60", va="top",
+                    rotation=90, zorder=7,
+                )
+
+        _draw_mgr_markers(ax1, y_top=14.8)
+
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+    with st.expander("How this works — full methodology"):
+        st.markdown("""
+**Step 1 — What is xPts?**
+
+Every match has an xG (expected goals) value for each team, based on the quality and quantity of shots taken.
+From those two numbers we calculate xPts using a Poisson model: given that a team created X expected goals
+and conceded Y, what is the mathematical probability of winning, drawing, or losing?
+`xPts = 3 × P(win) + 1 × P(draw)`. This strips out luck — a team that dominated but lost 1-0 on a fluke
+will still show a high xPts for that game.
+
+**Step 2 — The squad value benchmark**
+
+We fit a log-linear regression across all 8 La Liga seasons:
+`predicted_xPts ≈ 10.5 × ln(squad_value_m) − 2.3` (R² = 0.71).
+This tells us what a team of a given Transfermarkt squad value *should* produce over a full season,
+purely based on resources. It is the purple dashed line on both charts and the benchmark all verdicts
+are measured against. A Getafe with 38 predicted xPts and a Real Madrid with 80 predicted xPts
+are judged against completely different standards.
+
+**Step 3 — The XGBoost prediction model**
+
+An XGBoost gradient boosting model is trained on every available La Liga match, 2018/19 through
+the current season. (This used to stop at 2022/23 and was never revisited as later seasons became
+available — out-of-sample accuracy on 2023-2025 had quietly degraded to r=0.55 vs. r=0.84 in-sample
+before this was corrected.) For each gameweek it receives 9 features — all purely xG-based, no actual results:
+
+| Feature | Window | What it captures |
+|---|---|---|
+| xGF rolling avg | last 5 games | Recent attacking quality |
+| xGA rolling avg | last 5 games | Recent defensive quality |
+| xGD rolling avg | last 5 games | Net chance quality |
+| xGD std dev | last 5 games | Consistency of performances |
+| xGF rolling avg | last 10 games | Medium-term attacking trend |
+| xGA rolling avg | last 10 games | Medium-term defensive trend |
+| xGD rolling avg | last 10 games | Medium-term net quality |
+| xGD std dev | last 10 games | Medium-term consistency |
+| Home/Away | — | Next fixture context |
+
+The model predicts how many **actual points** this team will earn over their next 5 games.
+Actual points, not xPts — because that is ultimately what managers are judged on.
+
+**Step 4 — Verdicts**
+
+After the prediction, a verdict is assigned by comparing it to the squad value benchmark:
+- **ALARM** — predicted pts < 75% of budget expectation AND 10-game xGD is negative (genuine sustained weakness, not a one-game blip)
+- **WATCH** — predicted pts < 90% of budget expectation (below what resources suggest)
+- **RECOVERING** — last 5 games show better xGD than last 10, and predicted pts ≥ 85% of benchmark (form turning)
+- **STABLE** — everything else (at or above expectation)
+
+**Why can a dot be red when it is above zero (or green when below)?**
+
+The dot *colour* comes from the verdict, which is about **where the team is heading** — it looks at the
+10-game xG trend to decide if poor form is genuine or temporary.
+The dot *position* on the second chart is just **this specific gameweek's xPts minus the budget expectation** —
+a single data point.
+
+These two can diverge: a team in genuine crisis (ALARM, red dot) can have one good game that puts that
+individual bar above zero. Equally, a STABLE team can have one off-day that dips below zero without
+the 10-game trend being concerning. The colour tells you what the data says is likely to *continue*;
+the position tells you what happened in *that specific week*.
+        """)
+
+        st.markdown("#### Verdict guide")
+        st.caption("What each label means based on a team's recent chance quality and predicted points rate.")
+        verdict_desc = {"ALARM": "Underlying chance quality is significantly worse than what the team is conceding, sustained bad form not a one-game blip",
+                "WATCH": "Points rate is tracking below the league average, not yet a crisis but the numbers are heading in the wrong direction",
+                "RECOVERING": "The last 5 games show better chance quality than the previous 10, form is turning around",
+                "STABLE": "Performing at or above what the squad value predicts, no statistical red flags"}
+        for v, c in COLORS.items():
+            st.markdown(
+                f"<span style='background:{c};color:white;padding:2px 8px;"
+                f"border-radius:4px;font-weight:bold'>{v}</span> {verdict_desc[v]}",
+                unsafe_allow_html=True)
+
+        st.markdown("#### xGD reference")
+        st.caption("Roughly how a team's average xGD translates to a quality tier:")
+        st.markdown("""
+| xGD avg | Level |
+|---|---|
+| +1.0 or above | Elite |
+| +0.4 to +1.0 | Good |
+| 0.0 to +0.4 | Average |
+| -0.4 to 0.0 | Slightly below |
+| -0.5 to -1.0 | Concerning |
+| Below -1.0 | Crisis |
+""")
+
+    # ── View 2: Zero-centered relative performance ───────────────────────────
+    st.divider()
+    st.subheader("Season timeline — relative performance view")
+    st.caption(
+        "Exactly the same XGBoost prediction as the chart above, just reframed: zero = the squad value benchmark. "
+        "When the line is above zero the model predicts this team will outscore their budget over the next 5 games; "
+        "below zero means underperforming it. Dot colour and position now always agree — "
+        "a red dot is always below zero, a green dot is always at or near zero or above."
+    )
+    if not tl.empty:
+        _rel   = pred - budget_per5          # predicted pts/5 minus budget expectation/5
+        _verd2 = tl["verdict"].values
+        _y_top2 = float(max(abs(_rel).max() * 1.15 + 0.3, 1.0))
+
+        fig_v2, ax_v2 = plt.subplots(figsize=(16, 4.5))
+        ax_v2.fill_between(gw, _rel, 0,
+                           where=(_rel >= 0), color="#2ecc71", alpha=0.4,
+                           label="Predicted above budget")
+        ax_v2.fill_between(gw, _rel, 0,
+                           where=(_rel <  0), color="#e74c3c", alpha=0.4,
+                           label="Predicted below budget")
+        ax_v2.plot(gw, _rel, color="steelblue", lw=2.5, zorder=4)
+        ax_v2.scatter(gw, _rel, c=[COLORS[v] for v in _verd2],
+                      s=55, zorder=5, edgecolors="white", lw=0.6)
+        ax_v2.axhline(0, color="black", lw=1.2, zorder=3)
+        ax_v2.set_xlim(gw[0] - 0.8, gw[-1] + 0.8)
+        ax_v2.set_xlabel("Gameweek", fontsize=10)
+        ax_v2.set_ylabel("Predicted pts (next 5) above / below budget", fontsize=10)
+        patches_v2 = [mpatches.Patch(color=c, alpha=0.7, label=l) for l, c in COLORS.items()]
+        ax_v2.legend(
+            handles=patches_v2 + [
+                plt.Line2D([0],[0], color="steelblue", lw=2.5, label="Predicted pts − budget"),
+                mpatches.Patch(color="#2ecc71", alpha=0.5, label="Above budget"),
+                mpatches.Patch(color="#e74c3c", alpha=0.5, label="Below budget"),
+            ],
+            fontsize=8, loc="upper right", ncol=3
+        )
+        ax_v2.grid(axis="y", alpha=0.18)
+
+        _shade_transfer_windows(ax_v2, tl, selected_season)
+        if len(managers) > 0 and not tl.empty:
+            _draw_mgr_markers(ax_v2, y_top=_y_top2)
+
+        plt.tight_layout()
+        st.pyplot(fig_v2)
+        plt.close()
+
+    # ── xG for / xGA rolling chart ────────────────────────────────────────────
+    st.subheader("Rolling xG for vs xGA (last 5 games)")
+    st.caption(
+        "How good the chances this team is **creating** (green line) compare to how good the "
+        "chances they're **conceding** (red line), averaged over their last 5 games. Dots are "
+        "individual matches — circles for home games, triangles for away. Green line clearly "
+        "above red = the team has been dominant lately, regardless of the actual scorelines."
+    )
+
+    xgf5  = tl["xgf5"].values
+    xga5  = tl["xga5"].values
+    xg_f  = tl["xg_for"].values
+    xg_a  = tl["xg_against"].values
+
+    fig3, ax3 = plt.subplots(figsize=(16, 4))
+    ax3.plot(gw, xgf5, color="#27ae60", linewidth=2.5, label="xGF avg (last 5)", zorder=4)
+    ax3.plot(gw, xga5, color="#e74c3c", linewidth=2.5, label="xGA avg (last 5)", zorder=4)
+    ax3.fill_between(gw, xgf5, xga5,
+                     where=(xgf5 >= xga5), alpha=0.15, color="#27ae60",
+                     interpolate=True, label="xGF > xGA (dominant)")
+    ax3.fill_between(gw, xgf5, xga5,
+                     where=(xgf5 < xga5),  alpha=0.15, color="#e74c3c",
+                     interpolate=True, label="xGA > xGF (under pressure)")
+    # Individual match dots
+    ax3.scatter(tl.loc[tl.home == 1, "gw"], tl.loc[tl.home == 1, "xg_for"],
+                color="#27ae60", s=20, alpha=0.5, zorder=3, label="Match xGF (H)")
+    ax3.scatter(tl.loc[tl.home == 0, "gw"], tl.loc[tl.home == 0, "xg_for"],
+                color="#27ae60", s=20, marker="^", alpha=0.5, zorder=3, label="Match xGF (A)")
+    ax3.scatter(tl.loc[tl.home == 1, "gw"], tl.loc[tl.home == 1, "xg_against"],
+                color="#e74c3c", s=20, alpha=0.5, zorder=3, label="Match xGA (H)")
+    ax3.scatter(tl.loc[tl.home == 0, "gw"], tl.loc[tl.home == 0, "xg_against"],
+                color="#e74c3c", s=20, marker="^", alpha=0.5, zorder=3, label="Match xGA (A)")
+    ax3.axhline(1.0, color="grey", linewidth=0.8, linestyle=":", alpha=0.6)
+    ax3.axhline(0,   color="black", linewidth=0.5)
+    _shade_transfer_windows(ax3, tl, selected_season)
+    # Manager markers (reuse helper defined in main chart block above)
+    if len(managers) > 0 and not tl.empty:
+        _draw_mgr_markers(ax3, y_top=ax3.get_ylim()[1] * 0.92)
+    ax3.set_xlabel("Gameweek", fontsize=10)
+    ax3.set_ylabel("xG per game (rolling 5)", fontsize=10)
+    ax3.set_title(
+        f"{selected_team}  |  Season avg: xGF {tl['xg_for'].mean():.2f} / "
+        f"xGA {tl['xg_against'].mean():.2f} per game",
+        fontsize=11
+    )
+    ax3.set_xlim(gw[0] - 0.5, gw[-1] + 0.5)
+    ax3.set_ylim(bottom=0)
+    ax3.legend(fontsize=8, loc="upper right", ncol=2)
+    ax3.grid(axis="y", alpha=0.25)
+    plt.tight_layout()
+    st.pyplot(fig3)
+    plt.close()
+
+    st.divider()
+    # ── Sample size / stabilisation ───────────────────────────────────
+    st.divider()
+    st.markdown("### The sample size question — how many games before you can trust the skill score?")
+    st.caption(
+        "For manager stints with 25+ games: correlation between the xPts/game rate after N games "
+        "and the full-stint rate. When this correlation exceeds ~0.80 the early signal is reliable."
+    )
+    if not mgr_stints.empty and not managers.empty:
+        mgr2_stab = managers.copy()
+        mgr2_stab["date_to_filled"] = managers["date_to"].fillna(pd.Timestamp("2100-01-01"))
+        n_vals = [5, 8, 10, 12, 15, 19]
+        n_corrs = {}
+        for n_check in n_vals:
+            early_list, full_list = [], []
+            for _, stint in mgr_stints[mgr_stints.games >= 25].iterrows():
+                mgr_name, team, season = stint["manager"], stint["team"], stint["season"]
+                mgr_rows = mgr2_stab[(mgr2_stab.manager==mgr_name) & (mgr2_stab.team==team)]
+                if mgr_rows.empty: continue
+                mr = mgr_rows.iloc[0]
+                matches = tm[
+                    (tm.team==team) & (tm.date>=mr.date_from) &
+                    (tm.date<=mr.date_to_filled) & (tm.season==season)
+                ].sort_values("date")
+                if len(matches) < 25: continue
+                early_list.append(matches.iloc[:n_check]["xpts"].mean())
+                full_list.append(matches["xpts"].mean())
+            if len(early_list) >= 10:
+                r, _ = stats.pearsonr(early_list, full_list)
+                n_corrs[n_check] = (r, len(early_list))
+        if n_corrs:
+            fig_ss, ax_ss = plt.subplots(figsize=(9, 4))
+            gx = list(n_corrs.keys())
+            cy = [n_corrs[g][0] for g in gx]
+            ax_ss.plot(gx, cy, marker="o", linewidth=2.5, color="#3498db")
+            ax_ss.fill_between(gx, cy, alpha=0.12, color="#3498db")
+            for g, c in zip(gx, cy):
+                ax_ss.annotate(f"r={c:.2f}\nn={n_corrs[g][1]}", (g, c),
+                               xytext=(0,10), textcoords="offset points", fontsize=8, ha="center")
+            ax_ss.axhline(0.70, color="#f39c12", linewidth=1, linestyle="--", alpha=0.7, label="r=0.70 (reasonable signal)")
+            ax_ss.axhline(0.85, color="#2ecc71", linewidth=1, linestyle="--", alpha=0.7, label="r=0.85 (strong signal)")
+            ax_ss.set_xlabel("Games managed", fontsize=9)
+            ax_ss.set_ylabel("Correlation with full-stint xPts rate", fontsize=9)
+            ax_ss.set_title("How many games before a manager's xPts rate becomes reliable?", fontsize=10)
+            ax_ss.set_ylim(0, 1.05)
+            ax_ss.set_xticks(gx)
+            ax_ss.legend(fontsize=8)
+            plt.tight_layout()
+            st.pyplot(fig_ss)
+            plt.close()
